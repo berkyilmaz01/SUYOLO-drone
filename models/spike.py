@@ -129,7 +129,7 @@ class SDConv(nn.Module):
     ):
         super().__init__()
         self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True,step_mode='s',v_threshold=float('inf'))
-        self.conv = layer.Conv2d(c1, c2, k, step_mode='s')
+        self.conv = layer.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False, step_mode='s')
         self.bn = seBatchNorm(c2,time_step)
         self.act = self.default_act
 
