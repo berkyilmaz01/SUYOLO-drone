@@ -263,11 +263,11 @@ class SDDetect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=80, ch=(), inplace=True, reg_max=16):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16
+        self.reg_max = reg_max
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.stride = torch.zeros(self.nl)  # strides computed during build

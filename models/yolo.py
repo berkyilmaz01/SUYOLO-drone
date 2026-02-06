@@ -689,7 +689,7 @@ class ClassificationModel(BaseModel):
 def parse_model(d, ch):  # model_dict, input_channels(3)
     # Parse a YOLO model.yaml dictionary
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
-    anchors, nc, gd, gw, act = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d.get('activation')
+    anchors, nc, gd, gw, act, reg_max = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d.get('activation'), d.get('reg_max', 16)
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
         RepConvN.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
@@ -735,6 +735,9 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])
             # if isinstance(args[1], int):  # number of anchors
             #     args[1] = [list(range(args[1] * 2))] * len(f)
+            if m in {SDDetect} and reg_max != 16:
+                # Pass reg_max as keyword arg: SDDetect(nc, ch, inplace=True, reg_max=N)
+                args = [args[0], args[1], True, reg_max]
             if m in {Segment, Panoptic}:
                 args[2] = make_divisible(args[2] * gw, 8)
         elif m in {Contract}:
