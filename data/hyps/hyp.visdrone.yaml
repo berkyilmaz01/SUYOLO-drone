@@ -1,0 +1,40 @@
+# Hyperparameters tuned for VisDrone drone surveillance dataset
+# Based on hyp.scratch-high.yaml with VisDrone-specific adjustments
+#
+# Key differences from scratch-high:
+#   - mosaic: 0.5 (VisDrone scenes are already dense, less mosaic needed)
+#   - scale: 0.5 (drone images already have natural scale variation)
+#   - flipud: 0.5 (drone perspective benefits from vertical flip)
+#   - mixup: 0.05 (lighter mixup works better for small objects)
+#   - copy_paste: 0.0 (requires segmentation labels, VisDrone has bbox only)
+#   - translate: 0.2 (more translation helps position diversity)
+
+lr0: 0.01  # initial learning rate (SGD=1E-2, Adam=1E-3)
+lrf: 0.01  # final OneCycleLR learning rate (lr0 * lrf)
+momentum: 0.937  # SGD momentum/Adam beta1
+weight_decay: 0.0005  # optimizer weight decay 5e-4
+warmup_epochs: 3.0  # warmup epochs (fractions ok)
+warmup_momentum: 0.8  # warmup initial momentum
+warmup_bias_lr: 0.1  # warmup initial bias lr
+box: 7.5  # box loss gain
+cls: 0.5  # cls loss gain
+cls_pw: 1.0  # cls BCELoss positive_weight
+obj: 0.7  # obj loss gain (scale with pixels)
+obj_pw: 1.0  # obj BCELoss positive_weight
+dfl: 1.5  # dfl loss gain
+iou_t: 0.20  # IoU training threshold
+anchor_t: 5.0  # anchor-multiple threshold
+fl_gamma: 0.0  # focal loss gamma (efficientDet default gamma=1.5)
+hsv_h: 0.015  # image HSV-Hue augmentation (fraction)
+hsv_s: 0.7  # image HSV-Saturation augmentation (fraction)
+hsv_v: 0.4  # image HSV-Value augmentation (fraction)
+degrees: 0.0  # image rotation (+/- deg)
+translate: 0.2  # image translation (+/- fraction) — more than default for position diversity
+scale: 0.5  # image scale (+/- gain) — reduced, drone images have natural scale variation
+shear: 0.0  # image shear (+/- deg)
+perspective: 0.0  # image perspective (+/- fraction), range 0-0.001
+flipud: 0.5  # image flip up-down — drone perspective benefits from vertical flip
+fliplr: 0.5  # image flip left-right (probability)
+mosaic: 0.5  # image mosaic — reduced, VisDrone scenes are already dense
+mixup: 0.05  # image mixup — lighter, helps preserve small object detail
+copy_paste: 0.0  # segment copy-paste — disabled, VisDrone has bbox-only annotations
