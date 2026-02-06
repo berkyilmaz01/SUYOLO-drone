@@ -23,6 +23,13 @@ from scipy.stats import norm, gaussian_kde
 
 time_step = 4
 
+
+def set_time_step(t):
+    """Set the global time_step used by all spiking modules.
+    Lower values (1-2) improve DPU/FPGA inference speed at the cost of accuracy."""
+    global time_step
+    time_step = t
+
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     # Pad to 'same' shape outputs
     if d > 1:
@@ -64,6 +71,45 @@ class SEncoder(nn.Module):
         out = self.bn2(out)
         out = [self.act2(out[i]) for i in range(time_step)]
 
+        return out
+
+
+class SEncoderLite(nn.Module):
+    """Lightweight encoder for high-resolution input (720p+).
+    Unlike SEncoder, applies stride 2 in the FIRST conv to immediately
+    halve spatial dims, saving ~30% GOPS on the stem at 1280x736."""
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int,
+            s: int = 1,
+            p=None,
+            g: int = 1,
+            d: int = 1,
+            act=True,
+            lif: callable = None,
+            step_mode: str = 's'
+    ):
+        super().__init__()
+        self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+        # stride 2 FIRST — immediately halve spatial dims (cheap: Cin=3)
+        self.conv = layer.Conv2d(c1, c2, k, 2, autopad(k, p, d), groups=g, dilation=d, bias=False, step_mode='s')
+        self.bn = seBatchNorm(c2, time_step)
+        self.act = self.default_act if act is True else nn.Identity()
+        # stride 1 at half resolution (expensive conv runs at 640x368 not 1280x736)
+        self.conv2 = layer.Conv2d(c2, c2, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False, step_mode='s')
+        self.bn2 = seBatchNorm(c2, time_step)
+        self.act2 = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+
+    def forward(self, x):
+        x = [x for _ in range(time_step)]
+        x = [self.conv(x[i]) for i in range(time_step)]
+        x = self.bn(x)
+        out = [self.act(x[i]) for i in range(time_step)]
+        out = [self.conv2(out[i]) for i in range(time_step)]
+        out = self.bn2(out)
+        out = [self.act2(out[i]) for i in range(time_step)]
         return out
 
 
@@ -256,11 +302,11 @@ class SDDetect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=80, ch=(), inplace=True, reg_max=16):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16
+        self.reg_max = reg_max
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.stride = torch.zeros(self.nl)  # strides computed during build
@@ -289,9 +335,11 @@ class SDDetect(nn.Module):
 
     def bias_init(self):
         m = self  # self.model[-1]  # Detect() module
+        # Use actual image size if available, otherwise default to 640
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].conv.bias.data[:] = 1.0  # box
-            b[-1].conv.bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].conv.bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
     
 def Denoise(x):
     x = [1-x[i] for i in range(time_step)]

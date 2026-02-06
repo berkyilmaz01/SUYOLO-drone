@@ -20,6 +20,7 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 
 from spikingjelly.activation_based.functional import reset_net
+from models.spike import set_time_step
 
 @smart_inference_mode()
 def run(
@@ -223,8 +224,8 @@ def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'checkpoint.pt', help='model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / '', help='file/dir/URL/glob/screen/0(webcam)')
-    parser.add_argument('--data', type=str, default=ROOT / 'data/urpc.yaml', help='(optional) dataset.yaml path')
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[320], help='inference size h,w')
+    parser.add_argument('--data', type=str, default=ROOT / 'data/visdrone.yaml', help='(optional) dataset.yaml path')
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[1280, 736], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
@@ -248,7 +249,9 @@ def parse_opt():
     parser.add_argument('--half', action='store_false', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--time-step', type=int, default=4, help='SNN time steps (lower=faster, e.g. 1 for FPGA)')
     opt = parser.parse_args()
+    set_time_step(opt.time_step)  # propagate to spiking modules
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
     return opt

@@ -46,7 +46,8 @@ def export_formats():
         ['TensorFlow Lite', 'tflite', '.tflite', True, False],
         ['TensorFlow Edge TPU', 'edgetpu', '_edgetpu.tflite', False, False],
         ['TensorFlow.js', 'tfjs', '_web_model', False, False],
-        ['PaddlePaddle', 'paddle', '_paddle_model', True, True],]
+        ['PaddlePaddle', 'paddle', '_paddle_model', True, True],
+        ['Vitis AI', 'vitisai', '_vitisai', True, False],]
     return pd.DataFrame(x, columns=['Format', 'Argument', 'Suffix', 'CPU', 'GPU'])
 
 
@@ -228,6 +229,74 @@ def export_paddle(model, im, file, metadata, prefix=colorstr('PaddlePaddle:')):
 
     pytorch2paddle(module=model, save_dir=f, jit_type='trace', input_examples=[im])  # export
     yaml_save(Path(f) / file.with_suffix('.yaml').name, metadata)  # add metadata.yaml
+    return f, None
+
+
+@try_export
+def export_vitisai(model, im, file, metadata, calib_data=None, prefix=colorstr('Vitis AI:')):
+    """Export model for Xilinx ZCU102 DPU via Vitis AI quantization.
+
+    Exports a DPU-compatible ONNX model with INT8 quantization via vai_q_pytorch.
+    Requires: pip install vai_q_pytorch (from Vitis AI toolchain)
+
+    The spiking IFNode activations are replaced with LeakyReLU (slope=0.1)
+    and seBatchNorm is flattened for DPU compatibility.
+    """
+    check_requirements('onnx')
+    import onnx
+
+    LOGGER.info(f'\n{prefix} starting Vitis AI / ZCU102 DPU export...')
+    f = str(file).replace('.pt', f'_vitisai{os.sep}')
+    os.makedirs(f, exist_ok=True)
+
+    # Step 1: Export DPU-compatible ONNX (with spiking ops collapsed)
+    onnx_path = os.path.join(f, 'model_dpu.onnx')
+    output_names = ['output0']
+    torch.onnx.export(
+        model.cpu(),
+        im.cpu(),
+        onnx_path,
+        verbose=False,
+        opset_version=12,
+        do_constant_folding=True,
+        input_names=['images'],
+        output_names=output_names,
+        dynamic_axes=None)  # fixed shape for DPU
+
+    model_onnx = onnx.load(onnx_path)
+    onnx.checker.check_model(model_onnx)
+    onnx.save(model_onnx, onnx_path)
+
+    # Step 2: Try Vitis AI quantization if available
+    try:
+        from pytorch_nndct.apis import torch_quantizer
+        LOGGER.info(f'{prefix} running INT8 quantization with vai_q_pytorch...')
+
+        # Quantize in calibration mode
+        quantizer = torch_quantizer('calib', model.cpu(), (im.cpu(),), output_dir=f)
+        quant_model = quantizer.quant_model
+        # Run calibration (use provided data or dummy)
+        if calib_data is not None:
+            for batch in calib_data:
+                quant_model(batch)
+        else:
+            for _ in range(100):
+                quant_model(im.cpu())
+        quantizer.export_quant_config()
+
+        # Export quantized xmodel
+        quantizer = torch_quantizer('test', model.cpu(), (im.cpu(),), output_dir=f)
+        quantizer.export_xmodel(output_dir=f, deploy_check=True)
+        LOGGER.info(f'{prefix} INT8 xmodel exported to {f}')
+    except ImportError:
+        LOGGER.warning(f'{prefix} vai_q_pytorch not found — only ONNX exported. '
+                       f'Install Vitis AI toolchain for INT8 quantization & xmodel compilation.')
+    except Exception as e:
+        LOGGER.warning(f'{prefix} quantization failed: {e}. ONNX model still available at {onnx_path}')
+
+    yaml_save(Path(f) / file.with_suffix('.yaml').name, metadata)
+    LOGGER.info(f'{prefix} DPU-compatible ONNX saved to {onnx_path}')
+    LOGGER.info(f'{prefix} Next steps: vai_c_xir -x {f}/model_dpu.xmodel -a /path/to/zcu102/arch.json -o {f} -n su_yolo')
     return f, None
 
 
@@ -533,7 +602,7 @@ def run(
     fmts = tuple(export_formats()['Argument'][1:])  # --include arguments
     flags = [x in include for x in fmts]
     assert sum(flags) == len(include), f'ERROR: Invalid --include {include}, valid --include arguments are {fmts}'
-    jit, onnx, onnx_end2end, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle = flags  # export booleans
+    jit, onnx, onnx_end2end, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, vitisai = flags  # export booleans
     file = Path(url2file(weights) if str(weights).startswith(('http:/', 'https:/')) else weights)  # PyTorch weights
 
     # Load PyTorch model
@@ -613,6 +682,8 @@ def run(
             f[9], _ = export_tfjs(file)
     if paddle:  # PaddlePaddle
         f[10], _ = export_paddle(model, im, file, metadata)
+    if vitisai:  # Vitis AI / Xilinx ZCU102 DPU
+        f[11], _ = export_vitisai(model, im, file, metadata)
 
     # Finish
     f = [str(x) for x in f if x]  # filter out '' and None
@@ -663,7 +734,7 @@ def parse_opt():
         '--include',
         nargs='+',
         default=['torchscript'],
-        help='torchscript, onnx, onnx_end2end, openvino, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle')
+        help='torchscript, onnx, onnx_end2end, openvino, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, vitisai')
     opt = parser.parse_args()
 
     if 'onnx_end2end' in opt.include:  

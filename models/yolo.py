@@ -74,11 +74,10 @@ class Detect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class DDetect(nn.Module):
@@ -125,11 +124,10 @@ class DDetect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class DualDetect(nn.Module):
@@ -185,14 +183,13 @@ class DualDetect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv4, m.cv5, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class DualDDetect(nn.Module):
@@ -254,14 +251,13 @@ class DualDDetect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv4, m.cv5, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class TripleDetect(nn.Module):
@@ -327,17 +323,16 @@ class TripleDetect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv4, m.cv5, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv6, m.cv7, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class TripleDDetect(nn.Module):
@@ -411,17 +406,16 @@ class TripleDDetect(nn.Module):
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
         m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv4, m.cv5, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
         for a, b, s in zip(m.cv6, m.cv7, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
 
 
 class Segment(Detect):
@@ -553,7 +547,7 @@ class BaseModel(nn.Module):
 
 class DetectionModel(BaseModel):
     # YOLO detection model
-    def __init__(self, cfg='yolo.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
+    def __init__(self, cfg='yolo.yaml', ch=3, nc=None, anchors=None, imgsz=640):  # model, input channels, number of classes
         super().__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
@@ -577,6 +571,7 @@ class DetectionModel(BaseModel):
         reset_net(self.model)
         # Build strides, anchors
         m = self.model[-1]  # Detect()
+        m._imgsz = imgsz  # store image size for bias_init scaling
         if isinstance(m, (SDDetect, Detect, DDetect, Segment, Panoptic)):
             s = 256  # 2x min stride
             m.inplace = self.inplace
@@ -694,7 +689,7 @@ class ClassificationModel(BaseModel):
 def parse_model(d, ch):  # model_dict, input_channels(3)
     # Parse a YOLO model.yaml dictionary
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
-    anchors, nc, gd, gw, act = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d.get('activation')
+    anchors, nc, gd, gw, act, reg_max = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d.get('activation'), d.get('reg_max', 16)
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
         RepConvN.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
@@ -711,7 +706,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
-            BasicBlock1, BasicBlock2, SEncoder, SConv, TransitionBlock, Conv, AConv, ConvTranspose, Bottleneck, SPP, SPPF,
+            BasicBlock1, BasicBlock2, SEncoder, SEncoderLite, SConv, TransitionBlock, Conv, AConv, ConvTranspose, Bottleneck, SPP, SPPF,
             DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown, RepNCSPELAN4, SPPELAN, ELAN1}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
@@ -740,6 +735,9 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])
             # if isinstance(args[1], int):  # number of anchors
             #     args[1] = [list(range(args[1] * 2))] * len(f)
+            if m in {SDDetect} and reg_max != 16:
+                # Pass reg_max as keyword arg: SDDetect(nc, ch, inplace=True, reg_max=N)
+                args = [args[0], args[1], True, reg_max]
             if m in {Segment, Panoptic}:
                 args[2] = make_divisible(args[2] * gw, 8)
         elif m in {Contract}:

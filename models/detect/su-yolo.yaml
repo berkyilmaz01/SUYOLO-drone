@@ -1,7 +1,7 @@
 # YOLOv9
 
 # parameters
-nc: 4  # number of classes
+nc: 10  # number of classes (VisDrone: 10, URPC: 4, UDD: 3 — overridden by data yaml at runtime)
 depth_multiple: 1.0  # model depth multiple
 width_multiple: 1.0  # layer channel multiple
 #activation: nn.LeakyReLU(0.1)
