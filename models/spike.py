@@ -23,6 +23,13 @@ from scipy.stats import norm, gaussian_kde
 
 time_step = 4
 
+
+def set_time_step(t):
+    """Set the global time_step used by all spiking modules.
+    Lower values (1-2) improve DPU/FPGA inference speed at the cost of accuracy."""
+    global time_step
+    time_step = t
+
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     # Pad to 'same' shape outputs
     if d > 1:
@@ -289,9 +296,11 @@ class SDDetect(nn.Module):
 
     def bias_init(self):
         m = self  # self.model[-1]  # Detect() module
+        # Use actual image size if available, otherwise default to 640
+        imgsz = getattr(m, '_imgsz', 640)
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].conv.bias.data[:] = 1.0  # box
-            b[-1].conv.bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].conv.bias.data[:m.nc] = math.log(5 / m.nc / (imgsz / s) ** 2)  # cls
     
 def Denoise(x):
     x = [1-x[i] for i in range(time_step)]
