@@ -14,7 +14,7 @@ from utils.general import make_divisible
 from utils.tal.anchor_generator import make_anchors, dist2bbox
 #from mamba_ssm import Mamba
 from .common import Conv
-import matplotlib; matplotlib.use('TkAgg')
+import matplotlib; matplotlib.use('Agg')  # non-interactive backend (safe for headless/ZCU102)
 import matplotlib.pyplot as plt
 from .common import SP
 from torchvision import transforms
@@ -129,7 +129,7 @@ class SDConv(nn.Module):
     ):
         super().__init__()
         self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True,step_mode='s',v_threshold=float('inf'))
-        self.conv = layer.Conv2d(c1, c2, k, step_mode='s')
+        self.conv = layer.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, step_mode='s')
         self.bn = seBatchNorm(c2,time_step)
         self.act = self.default_act
 
