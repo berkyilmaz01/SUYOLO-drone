@@ -74,6 +74,45 @@ class SEncoder(nn.Module):
         return out
 
 
+class SEncoderLite(nn.Module):
+    """Lightweight encoder for high-resolution input (720p+).
+    Unlike SEncoder, applies stride 2 in the FIRST conv to immediately
+    halve spatial dims, saving ~30% GOPS on the stem at 1280x736."""
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int,
+            s: int = 1,
+            p=None,
+            g: int = 1,
+            d: int = 1,
+            act=True,
+            lif: callable = None,
+            step_mode: str = 's'
+    ):
+        super().__init__()
+        self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+        # stride 2 FIRST — immediately halve spatial dims (cheap: Cin=3)
+        self.conv = layer.Conv2d(c1, c2, k, 2, autopad(k, p, d), groups=g, dilation=d, bias=False, step_mode='s')
+        self.bn = seBatchNorm(c2, time_step)
+        self.act = self.default_act if act is True else nn.Identity()
+        # stride 1 at half resolution (expensive conv runs at 640x368 not 1280x736)
+        self.conv2 = layer.Conv2d(c2, c2, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False, step_mode='s')
+        self.bn2 = seBatchNorm(c2, time_step)
+        self.act2 = neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+
+    def forward(self, x):
+        x = [x for _ in range(time_step)]
+        x = [self.conv(x[i]) for i in range(time_step)]
+        x = self.bn(x)
+        out = [self.act(x[i]) for i in range(time_step)]
+        out = [self.conv2(out[i]) for i in range(time_step)]
+        out = self.bn2(out)
+        out = [self.act2(out[i]) for i in range(time_step)]
+        return out
+
+
 class SDConv(nn.Module):
     def __init__(
             self,
