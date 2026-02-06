@@ -23,6 +23,7 @@ if platform.system() != 'Windows':
 
 from models.experimental import attempt_load, End2End
 from models.yolo import ClassificationModel, Detect, DDetect, DualDetect, DualDDetect, DetectionModel, SegmentationModel
+from models.spike import set_time_step
 from utils.dataloaders import LoadImages
 from utils.general import (LOGGER, Profile, check_dataset, check_img_size, check_requirements, check_version,
                            check_yaml, colorstr, file_size, get_default_args, print_args, url2file, yaml_save)
@@ -596,7 +597,9 @@ def run(
         topk_all=100,  # TF.js NMS: topk for all classes to keep
         iou_thres=0.45,  # TF.js NMS: IoU threshold
         conf_thres=0.25,  # TF.js NMS: confidence threshold
+    time_step=4,  # SNN time steps (must match training config)
 ):
+    set_time_step(time_step)
     t = time.time()
     include = [x.lower() for x in include]  # to lowercase
     fmts = tuple(export_formats()['Argument'][1:])  # --include arguments
@@ -735,6 +738,7 @@ def parse_opt():
         nargs='+',
         default=['torchscript'],
         help='torchscript, onnx, onnx_end2end, openvino, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, vitisai')
+    parser.add_argument('--time-step', type=int, default=4, help='SNN time steps (must match training config)')
     opt = parser.parse_args()
 
     if 'onnx_end2end' in opt.include:  
