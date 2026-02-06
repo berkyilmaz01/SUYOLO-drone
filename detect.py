@@ -4,6 +4,7 @@ import platform
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 FILE = Path(__file__).resolve()
@@ -18,6 +19,7 @@ from utils.general import (LOGGER, Profile, check_file, check_img_size, check_im
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
+from utils.tracker import ByteTracker
 
 from spikingjelly.activation_based.functional import reset_net
 from models.spike import set_time_step
@@ -51,6 +53,10 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        track=False,  # enable ByteTrack bounding box tracking
+        track_thresh=0.5,  # tracker high-confidence threshold
+        track_buffer=30,  # frames to keep lost tracks
+        match_thresh=0.8,  # IoU threshold for track matching
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -84,6 +90,12 @@ def run(
         #cudnn.benchmark = True
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
     vid_path, vid_writer = [None] * bs, [None] * bs
+
+    # Initialize tracker
+    tracker = ByteTracker(
+        track_thresh=track_thresh, match_thresh=match_thresh,
+        track_buffer=track_buffer, frame_rate=60
+    ) if track else None
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
@@ -125,58 +137,67 @@ def run(
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            '''
-            with open(f'a.txt', 'r') as f:
-                labels = f.readlines()
-            for label in labels:
-                # Parse the label line
-                label_data = list(map(float, label.split()))
-                cls = int(label_data[0])  # Class index
-                x_center, y_center, width, height = label_data[1:5]  # xywh format
-
-                # Convert normalized xywh to pixel xyxy
-                x_center *= im0.shape[1]  # Convert x_center to pixels
-                y_center *= im0.shape[0]  # Convert y_center to pixels
-                width *= im0.shape[1]      # Convert width to pixels
-                height *= im0.shape[0]     # Convert height to pixels
-
-                x1 = x_center - width / 2
-                y1 = y_center - height / 2
-                x2 = x_center + width / 2
-                y2 = y_center + height / 2
-                xyxy = [x1, y1, x2, y2]
-
-                # Add bbox to image
-                c = int(cls)  # integer class
-                label = None if hide_labels else (names[c] if hide_conf else f'{names[c]}')
-                annotator.box_label(xyxy, label, color=colors(c, True))
-
-                if save_crop:
-                    save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-            '''
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
-                # Print results
-                for c in det[:, 5].unique():
-                    n = (det[:, 5] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                # Tracking: associate detections across frames
+                if tracker is not None:
+                    # det is (N, 6): [x1, y1, x2, y2, conf, cls]
+                    tracks = tracker.update(det.cpu().numpy())
+                    # tracks is (M, 7): [x1, y1, x2, y2, track_id, cls, conf]
 
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                        with open(f'{txt_path}.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+                    # Print results
+                    if len(tracks):
+                        track_cls = tracks[:, 5]
+                        for c in np.unique(track_cls):
+                            n = (track_cls == c).sum()
+                            s += f"{int(n)} {names[int(c)]}{'s' * (n > 1)}, "
 
-                    if save_img or save_crop or view_img:  # Add bbox to image
-                        c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        annotator.box_label(xyxy, label, color=colors(c, True))
-                    if save_crop:
-                        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                    # Write/draw tracked results
+                    for trk in tracks:
+                        xyxy = trk[:4].tolist()
+                        track_id = int(trk[4])
+                        cls = int(trk[5])
+                        conf = trk[6]
+
+                        if save_txt:
+                            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()
+                            line = (cls, *xywh, conf, track_id) if save_conf else (cls, *xywh, track_id)
+                            with open(f'{txt_path}.txt', 'a') as f:
+                                f.write(('%g ' * len(line)).rstrip() % tuple(line) + '\n')
+
+                        if save_img or save_crop or view_img:
+                            label = None if hide_labels else (
+                                f'#{track_id} {names[cls]}' if hide_conf else f'#{track_id} {names[cls]} {conf:.2f}'
+                            )
+                            annotator.box_label(xyxy, label, color=colors(track_id % 20, True))
+                        if save_crop:
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[cls] / f'{p.stem}_id{track_id}.jpg', BGR=True)
+                else:
+                    # No tracking — original detection-only path
+                    # Print results
+                    for c in det[:, 5].unique():
+                        n = (det[:, 5] == c).sum()  # detections per class
+                        s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                    # Write results
+                    for *xyxy, conf, cls in reversed(det):
+                        if save_txt:  # Write to file
+                            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                            line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                            with open(f'{txt_path}.txt', 'a') as f:
+                                f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                        if save_img or save_crop or view_img:  # Add bbox to image
+                            c = int(cls)  # integer class
+                            label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                            annotator.box_label(xyxy, label, color=colors(c, True))
+                        if save_crop:
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+            elif tracker is not None:
+                # No detections this frame — still update tracker
+                tracker.update(None)
             
             # Stream results
             im0 = annotator.result()
@@ -246,9 +267,13 @@ def parse_opt():
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
     parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
     parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
-    parser.add_argument('--half', action='store_false', help='use FP16 half-precision inference')
+    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--track', action='store_true', help='enable ByteTrack bounding box tracking')
+    parser.add_argument('--track-thresh', type=float, default=0.5, help='tracker high-confidence threshold')
+    parser.add_argument('--track-buffer', type=int, default=30, help='frames to keep lost tracks alive')
+    parser.add_argument('--match-thresh', type=float, default=0.8, help='IoU threshold for track matching')
     parser.add_argument('--time-step', type=int, default=4, help='SNN time steps (lower=faster, e.g. 1 for FPGA)')
     opt = parser.parse_args()
     set_time_step(opt.time_step)  # propagate to spiking modules

@@ -14,7 +14,7 @@ from utils.general import make_divisible
 from utils.tal.anchor_generator import make_anchors, dist2bbox
 #from mamba_ssm import Mamba
 from .common import Conv
-import matplotlib; matplotlib.use('TkAgg')
+import matplotlib; matplotlib.use('Agg')  # non-interactive backend (safe for headless/ZCU102)
 import matplotlib.pyplot as plt
 from .common import SP
 from torchvision import transforms
