@@ -57,6 +57,7 @@ def run(
         track_thresh=0.5,  # tracker high-confidence threshold
         track_buffer=30,  # frames to keep lost tracks
         match_thresh=0.8,  # IoU threshold for track matching
+        time_step=4,  # SNN time steps (already set via set_time_step before run)
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
