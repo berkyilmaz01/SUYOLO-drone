@@ -60,10 +60,11 @@ class FocalLoss(nn.Module):
 
 
 class BboxLoss(nn.Module):
-    def __init__(self, reg_max, use_dfl=False):
+    def __init__(self, reg_max, use_dfl=False, inner_iou_ratio=None):
         super().__init__()
         self.reg_max = reg_max
         self.use_dfl = use_dfl
+        self.inner_iou_ratio = inner_iou_ratio
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         # iou loss
@@ -71,8 +72,8 @@ class BboxLoss(nn.Module):
         pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).view(-1, 4)
         target_bboxes_pos = torch.masked_select(target_bboxes, bbox_mask).view(-1, 4)
         bbox_weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
-        
-        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
+
+        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True, inner_iou_ratio=self.inner_iou_ratio)
         loss_iou = 1.0 - iou
 
         loss_iou *= bbox_weight
@@ -139,8 +140,9 @@ class ComputeLoss:
                                             num_classes=self.nc,
                                             alpha=float(os.getenv('YOLOA', 0.5)),
                                             beta=float(os.getenv('YOLOB', 6.0)))
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=use_dfl).to(device)
-        self.bbox_loss2 = BboxLoss(m.reg_max - 1, use_dfl=use_dfl).to(device)
+        inner_iou_ratio = h.get("inner_iou_ratio", None)
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=use_dfl, inner_iou_ratio=inner_iou_ratio).to(device)
+        self.bbox_loss2 = BboxLoss(m.reg_max - 1, use_dfl=use_dfl, inner_iou_ratio=inner_iou_ratio).to(device)
         self.proj = torch.arange(m.reg_max).float().to(device)  # / 120.0
         self.use_dfl = use_dfl
 
@@ -283,7 +285,8 @@ class ComputeLossLH:
                                             num_classes=self.nc,
                                             alpha=float(os.getenv('YOLOA', 0.5)),
                                             beta=float(os.getenv('YOLOB', 6.0)))
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=use_dfl).to(device)
+        inner_iou_ratio = h.get("inner_iou_ratio", None)
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=use_dfl, inner_iou_ratio=inner_iou_ratio).to(device)
         self.proj = torch.arange(m.reg_max).float().to(device)  # / 120.0
         self.use_dfl = use_dfl
 
