@@ -171,7 +171,7 @@ def run(
                                        rect=True,
                                        rank=-1,
                                        workers=workers,
-                                       min_items=opt.min_items,
+                                       min_items=min_items,
                                        prefix=colorstr(f'{task}: '))[0]
 
     seen = 0
