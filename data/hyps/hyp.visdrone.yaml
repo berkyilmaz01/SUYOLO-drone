@@ -38,3 +38,4 @@ fliplr: 0.5  # image flip left-right (probability)
 mosaic: 0.5  # image mosaic — reduced, VisDrone scenes are already dense
 mixup: 0.05  # image mixup — lighter, helps preserve small object detail
 copy_paste: 0.0  # segment copy-paste — disabled, VisDrone has bbox-only annotations
+inner_iou_ratio: 0.7  # Inner-IoU scale factor (arxiv:2311.02877) — 0.7 accelerates small object bbox regression

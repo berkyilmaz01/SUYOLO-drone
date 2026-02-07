@@ -281,8 +281,9 @@ class WIoU_Scale:
         return 1
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=False, feat_h=640, feat_w=640, eps=1e-7):
+def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=False, inner_iou_ratio=None, feat_h=640, feat_w=640, eps=1e-7):
     # Returns Intersection over Union (IoU) of box1(1,4) to box2(n,4)
+    # inner_iou_ratio: scale factor for Inner-IoU (arxiv:2311.02877), e.g. 0.7 for small objects
 
     # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
@@ -305,6 +306,28 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=F
 
     # IoU
     iou = inter / union
+
+    # Inner-IoU: compute IoU on scaled auxiliary bounding boxes
+    if inner_iou_ratio is not None:
+        # Box centers
+        cx1, cy1 = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+        cx2, cy2 = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+        # Scaled half-dimensions
+        iw1, ih1 = w1 * inner_iou_ratio / 2, h1 * inner_iou_ratio / 2
+        iw2, ih2 = w2 * inner_iou_ratio / 2, h2 * inner_iou_ratio / 2
+        # Scaled box coordinates
+        ib1_x1, ib1_x2 = cx1 - iw1, cx1 + iw1
+        ib1_y1, ib1_y2 = cy1 - ih1, cy1 + ih1
+        ib2_x1, ib2_x2 = cx2 - iw2, cx2 + iw2
+        ib2_y1, ib2_y2 = cy2 - ih2, cy2 + ih2
+        # Inner intersection and union
+        inner_inter = (torch.min(ib1_x2, ib2_x2) - torch.max(ib1_x1, ib2_x1)).clamp(0) * \
+                      (torch.min(ib1_y2, ib2_y2) - torch.max(ib1_y1, ib2_y1)).clamp(0)
+        inner_union = w1 * h1 * inner_iou_ratio ** 2 + w2 * h2 * inner_iou_ratio ** 2 - inner_inter + eps
+        inner_iou = inner_inter / inner_union
+    else:
+        inner_iou = iou
+
     if CIoU or DIoU or GIoU:
         cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
         ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
@@ -315,16 +338,16 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=F
                 v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
-                return iou - (rho2 / c2 + v * alpha)  # CIoU
-            return iou - rho2 / c2  # DIoU
+                return inner_iou - (rho2 / c2 + v * alpha)  # Inner-CIoU
+            return inner_iou - rho2 / c2  # Inner-DIoU
         c_area = cw * ch + eps  # convex area
-        return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+        return inner_iou - (c_area - union) / c_area  # Inner-GIoU
     elif MDPIoU:
         d1 = (b2_x1 - b1_x1) ** 2 + (b2_y1 - b1_y1) ** 2
         d2 = (b2_x2 - b1_x2) ** 2 + (b2_y2 - b1_y2) ** 2
         mpdiou_hw_pow = feat_h ** 2 + feat_w ** 2
-        return iou - d1 / mpdiou_hw_pow - d2 / mpdiou_hw_pow  # MPDIoU
-    return iou  # IoU
+        return inner_iou - d1 / mpdiou_hw_pow - d2 / mpdiou_hw_pow  # Inner-MPDIoU
+    return inner_iou  # Inner-IoU
 
 
 def box_iou(box1, box2, eps=1e-7):
