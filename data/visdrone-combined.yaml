@@ -1,0 +1,33 @@
+# VisDrone combined dataset: DET (images) + MOT (sampled video frames)
+#
+# Preparation:
+#   1. Convert DET annotations:
+#      python scripts/convert_visdrone_to_yolo.py --visdrone-dir ../VisDrone
+#
+#   2. Convert MOT + merge with DET:
+#      python scripts/convert_visdrone_mot_to_yolo.py \
+#        --mot-dir ../VisDrone-MOT/VisDrone2019-MOT-train \
+#        --det-dir ../VisDrone/train_data/VisDrone2019-DET-train \
+#        --output-dir ../VisDrone/combined_train \
+#        --sample-rate 10
+#
+# This gives ~6,471 DET images + ~2,000-3,000 sampled MOT frames = ~9,000 training images
+
+path: ../VisDrone
+train: combined_train/images
+val: val_data/VisDrone2019-DET-val/images
+test: test_data/images
+
+# 10 classes (VisDrone categories 1-10)
+nc: 10
+names:
+  0: pedestrian
+  1: people
+  2: bicycle
+  3: car
+  4: van
+  5: truck
+  6: tricycle
+  7: awning-tricycle
+  8: bus
+  9: motor
