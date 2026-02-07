@@ -1,0 +1,96 @@
+# SU-YOLO Ghost — Novel SNN architecture with Ghost Convolutions
+#
+# Key innovation: SGhostConv replaces standard SConv in backbone/neck,
+# enabling 2x wider channels at similar GOPS to the mid model.
+#
+# Design philosophy:
+#   - Ghost convolutions: 1x1 pointwise + 5x5 depthwise = ~15x cheaper than 3x3
+#   - 2x wider backbone (64→128→256→256ch) for richer features
+#   - 3 detection scales: P2/P3/P4 for small-to-large objects
+#   - Same binary spike activations — fully DPU-compatible
+#   - 5x5 depthwise ghost branch expands receptive field for free
+#
+# GOPS estimate at 1280x736, time_step=1:
+#   SEncoderLite (3→64):    2.56 GOPS  (stem — standard conv, Cin=3 is cheap)
+#   GhostBlock1 (64→128):   0.30 GOPS  (P2/4, ghost ~8x cheaper than BB1)
+#   GhostBlock1 (128→256):  0.30 GOPS  (P3/8)
+#   GhostBlock1 (256→256):  0.20 GOPS  (P4/16)
+#   Head (Ghost PAN 3-scale):1.50 GOPS  (neck, ghost blocks)
+#   SDDetect (P2+P3+P4):    8.00 GOPS  (heads, 64ch — same as mid)
+#   TOTAL:                 ~13 GOPS at 1280x736
+#                          ~29 GOPS at 1920x1080
+#
+# Compared to mid model at same GOPS budget:
+#   Mid:   128ch backbone, 64ch head → 2,880 bits/pedestrian at P2
+#   Ghost: 256ch backbone, 64ch head → 5,760 bits/pedestrian at P2 (2x!)
+#
+# ZCU102 deployment at 1280x736:
+#   Vitis AI DPU (60% util):  ~53 FPS single core, ~160 FPS 3-core
+#   HLS-optimized (80% util): ~71 FPS single core
+#   Latency: ~13ms (single core) → under 15ms target ✓
+#
+# At 1920x1080 (~29 GOPS):
+#   DPU 3-core pipeline: ~71 FPS throughput ✓
+#   Single-core latency: ~42ms (misses 15ms, needs 1280x736 for latency)
+#
+# Train: python train.py --cfg models/detect/su-yolo-ghost.yaml \
+#          --data data/visdrone-mot.yaml --hyp data/hyps/hyp.visdrone.yaml \
+#          --img 1920 --batch 2 --time-step 1 --epochs 200 --cos-lr
+# Export: python export.py --weights best.pt --imgsz 736 1280 --include vitisai
+
+# parameters
+nc: 10  # VisDrone classes
+depth_multiple: 1.0
+width_multiple: 1.0
+reg_max: 8
+anchors: 2
+
+# backbone — 3-stage with Ghost convolutions. 2x wider than mid.
+backbone:
+  [
+   # SEncoderLite: standard conv (Cin=3 is tiny, ghost overhead not worth it)
+   [-1, 1, SEncoderLite, [64, 3, 2]],  # 0-P1/2  64ch
+
+   # Ghost downsample blocks: cheap wide feature extraction
+   [-1, 1, GhostBlock1, [128, 128, 64, 1]],  # 1-P2/4  128ch
+   [-1, 1, GhostBlock1, [256, 256, 128, 1]],  # 2-P3/8  256ch
+   [-1, 1, GhostBlock1, [256, 256, 128, 1]],  # 3-P4/16  256ch
+  ]
+
+# head — P2/P3/P4 three-scale PAN with Ghost blocks
+head:
+  [
+    # 1x1 channel reduce on P4
+   [ -1, 1, SConv, [ 64, 1, 1 ] ],  # 4 — 256→64ch
+
+    # upsample + concat with backbone P3
+   [ -1, 1, SUpsample, [ 2 ] ],  # 5 — 64ch
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # 6 — cat → 320ch
+
+    # Ghost block for P3
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 7 (P3/8) 64ch
+
+    # upsample + concat with backbone P2
+   [ -1, 1, SUpsample, [ 2 ] ],  # 8 — 64ch
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 9 — cat → 192ch
+
+    # Ghost block for P2 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 10 (P2/4) 64ch
+
+    # downsample + concat with head P3
+   [-1, 1, SConv, [64, 3, 2]],  # 11 — 64ch
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # 12 — cat → 128ch
+
+    # Ghost block for P3 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 13 (P3/8) 64ch
+
+    # downsample + concat with head P4
+   [-1, 1, SConv, [64, 3, 2]],  # 14 — 64ch
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # 15 — cat → 128ch
+
+    # Ghost block for P4 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 16 (P4/16) 64ch
+
+    # detect at P2 + P3 + P4 (3 scales)
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+  ]
