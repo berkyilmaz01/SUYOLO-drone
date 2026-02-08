@@ -166,6 +166,107 @@ class SConv(nn.Module):
         out = [self.act(out[i]) for i in range(time_step)]
         return out
 
+class SGhostConv(nn.Module):
+    """Spiking Ghost Convolution — generates features cheaply.
+
+    Splits output channels in two:
+      - Primary: 1x1 pointwise conv → half the channels (cheap, mixes channels)
+      - Ghost:   5x5 depthwise conv on primary output → other half (cheap, expands receptive field)
+    Concat → full output channels.
+
+    Compared to a standard SConv 3x3 with same c1→c2:
+      SConv GOPS:  c1 * c2 * 9 * H * W
+      Ghost GOPS:  c1 * (c2/2) * 1  +  (c2/2) * 25  =  ~c1*c2/2 + 12.5*c2
+    For c1=c2=128:  SConv=147456  Ghost=8320+1600=9920  → ~15x cheaper
+    """
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        super().__init__()
+        c_half = c2 // 2
+        # Primary: 1x1 pointwise conv → half channels
+        self.primary = SConv(c1, c_half, 1, s, act=act)
+        # Ghost: 5x5 depthwise conv on primary output → other half
+        self.ghost = SConv(c_half, c_half, 5, 1, g=c_half, act=act)
+
+    def forward(self, x):
+        p = self.primary(x)
+        g = self.ghost(p)
+        # Concat primary + ghost along channel dim
+        out = [torch.cat([p[i], g[i]], 1) for i in range(time_step)]
+        return out
+
+
+class GhostBlock1(nn.Module):
+    """Ghost-based strided block (replaces BasicBlock1 for cheaper downsampling).
+
+    Same CSP-ELAN structure as BasicBlock1 but uses SGhostConv instead of SConv
+    for the main convolutions. Shortcut uses standard SConv 1x1 (already cheap).
+
+    GOPS savings vs BasicBlock1: ~5-8x depending on channel widths.
+    """
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cvres = SConv(c1, c2 // 2, 1, 2, act=False, n=2)  # 1x1 shortcut (already cheap)
+        self.cv0 = SGhostConv(c1, c2, 1, 2, act=False)  # ghost downsample
+        self.cv2 = SGhostConv(c4, c4, 1, 1, act=False)  # ghost refine
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+        self.c = c4
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        xres = self.cvres(x)
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        for i in range(time_step):
+            x4[i] = (x4[i] + xres[i])
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
+        return out
+
+
+class GhostBlock2(nn.Module):
+    """Ghost-based non-strided block (replaces BasicBlock2 for cheaper neck processing).
+
+    Same CSP-ELAN structure as BasicBlock2 but uses SGhostConv.
+    """
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cv0 = SConv(c1, c2, 1, 1, act=False)  # 1x1 channel adjust (already cheap)
+        self.cv2 = SGhostConv(c4, c4, 1, 1, act=False)  # ghost refine
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='s')
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
+        return out
+
+
 class SSP(nn.Module):
     def __init__(self, k=3, s=1):
         super(SSP, self).__init__()
