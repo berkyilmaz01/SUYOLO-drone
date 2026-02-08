@@ -170,20 +170,25 @@ class SGhostConv(nn.Module):
     """Spiking Ghost Convolution — generates features cheaply.
 
     Splits output channels in two:
-      - Primary: 1x1 pointwise conv → half the channels (cheap, mixes channels)
-      - Ghost:   5x5 depthwise conv on primary output → other half (cheap, expands receptive field)
+      - Primary: conv → half the channels (k=1 for stride-1, k=3 for stride-2)
+      - Ghost:   5x5 depthwise conv on primary output → other half
     Concat → full output channels.
+
+    When stride=2, the primary uses 3x3 conv to preserve spatial information
+    during downsampling (1x1 stride-2 would discard 75% of pixels without mixing).
 
     Compared to a standard SConv 3x3 with same c1→c2:
       SConv GOPS:  c1 * c2 * 9 * H * W
-      Ghost GOPS:  c1 * (c2/2) * 1  +  (c2/2) * 25  =  ~c1*c2/2 + 12.5*c2
-    For c1=c2=128:  SConv=147456  Ghost=8320+1600=9920  → ~15x cheaper
+      Ghost GOPS:  c1 * (c2/2) * k²  +  (c2/2) * 25
+    For c1=c2=128, s=1:  SConv=147456  Ghost=8192+1600=9792  → ~15x cheaper
+    For c1=c2=128, s=2:  SConv=36864   Ghost=18432+400=18832 → ~2x cheaper
     """
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         super().__init__()
         c_half = c2 // 2
-        # Primary: 1x1 pointwise conv → half channels
-        self.primary = SConv(c1, c_half, 1, s, act=act)
+        # Primary: use 3x3 when striding to preserve spatial info, 1x1 otherwise
+        pk = 3 if s >= 2 else 1
+        self.primary = SConv(c1, c_half, pk, s, act=act)
         # Ghost: 5x5 depthwise conv on primary output → other half
         self.ghost = SConv(c_half, c_half, 5, 1, g=c_half, act=act)
 

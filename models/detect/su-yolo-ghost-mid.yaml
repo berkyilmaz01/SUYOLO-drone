@@ -1,0 +1,85 @@
+# SU-YOLO Ghost-Mid — Ghost convolution drop-in for mid model
+#
+# PURPOSE: Fair ablation comparison with su-yolo-720p-mid.yaml.
+# Same channel widths (32→64→128→128) but GhostBlock replaces BasicBlock.
+# This isolates the effect of ghost convolution vs standard SConv.
+#
+# Architecture diff vs mid:
+#   Backbone: GhostBlock1 replaces BasicBlock1 (cheaper per-block)
+#   Head:     GhostBlock2 replaces BasicBlock2 (cheaper per-block)
+#   Channels: IDENTICAL to mid (32→64→128→128 backbone, 64ch head)
+#
+# GOPS estimate at 1280x736, time_step=1:
+#   SEncoderLite (3→32):    1.28 GOPS  (stem — same as mid)
+#   GhostBlock1 (32→64):    0.30 GOPS  (vs 0.86 BB1 — 2.9x cheaper)
+#   GhostBlock1 (64→128):   0.30 GOPS  (vs 0.86 BB1 — 2.9x cheaper)
+#   GhostBlock1 (128→128):  0.20 GOPS  (vs 0.43 BB1 — 2.2x cheaper)
+#   Head (Ghost PAN):       1.50 GOPS  (vs 3.50 BB2 — 2.3x cheaper)
+#   SDDetect (P2+P3+P4):    8.00 GOPS  (same — head dominates)
+#   TOTAL:                 ~12 GOPS (vs ~15 GOPS mid — 20% cheaper)
+#
+# If ghost-mid ≈ mid accuracy: ghost convs are efficient (publish!)
+# If ghost-mid < mid accuracy: binary spike limitation confirmed (also publish!)
+# Either way, this is a publishable ablation result.
+#
+# Train: python train.py --cfg models/detect/su-yolo-ghost-mid.yaml \
+#          --data data/visdrone-mot.yaml --hyp data/hyps/hyp.visdrone.yaml \
+#          --img 1920 --batch 2 --time-step 1 --epochs 200 --cos-lr
+# Export: python export.py --weights best.pt --imgsz 736 1280 --include vitisai
+
+# parameters
+nc: 10  # VisDrone classes
+depth_multiple: 1.0
+width_multiple: 1.0
+reg_max: 8
+anchors: 2
+
+# backbone — SAME channels as mid, but Ghost blocks
+backbone:
+  [
+   # SEncoderLite: same as mid (standard conv, Cin=3)
+   [-1, 1, SEncoderLite, [32, 3, 2]],  # 0-P1/2  32ch
+
+   # Ghost downsample blocks (same channels as mid BasicBlock1)
+   [-1, 1, GhostBlock1, [64, 64, 32, 1]],    # 1-P2/4   64ch
+   [-1, 1, GhostBlock1, [128, 128, 64, 1]],   # 2-P3/8  128ch
+   [-1, 1, GhostBlock1, [128, 128, 64, 1]],   # 3-P4/16 128ch
+  ]
+
+# head — SAME structure as mid, but Ghost blocks
+head:
+  [
+    # 1x1 channel reduce on P4
+   [ -1, 1, SConv, [ 64, 1, 1 ] ],  # 4 — 128→64ch
+
+    # upsample + concat with backbone P3
+   [ -1, 1, SUpsample, [ 2 ] ],  # 5 — 64ch
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # 6 — cat → 192ch
+
+    # Ghost block for P3
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 7 (P3/8) 64ch
+
+    # upsample + concat with backbone P2
+   [ -1, 1, SUpsample, [ 2 ] ],  # 8 — 64ch
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 9 — cat → 128ch
+
+    # Ghost block for P2 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 10 (P2/4) 64ch
+
+    # downsample + concat with head P3
+   [-1, 1, SConv, [64, 3, 2]],  # 11 — 64ch
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # 12 — cat → 128ch
+
+    # Ghost block for P3 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 13 (P3/8) 64ch
+
+    # downsample + concat with head P4
+   [-1, 1, SConv, [64, 3, 2]],  # 14 — 64ch
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # 15 — cat → 128ch
+
+    # Ghost block for P4 output
+   [ -1, 1, GhostBlock2, [ 64, 64, 32, 1 ] ],  # 16 (P4/16) 64ch
+
+    # detect at P2 + P3 + P4 (3 scales)
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+  ]

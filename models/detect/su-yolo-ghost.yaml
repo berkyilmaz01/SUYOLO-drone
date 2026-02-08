@@ -12,13 +12,13 @@
 #
 # GOPS estimate at 1280x736, time_step=1:
 #   SEncoderLite (3→64):    2.56 GOPS  (stem — standard conv, Cin=3 is cheap)
-#   GhostBlock1 (64→128):   0.30 GOPS  (P2/4, ghost ~8x cheaper than BB1)
-#   GhostBlock1 (128→256):  0.30 GOPS  (P3/8)
-#   GhostBlock1 (256→256):  0.20 GOPS  (P4/16)
-#   Head (Ghost PAN 3-scale):1.50 GOPS  (neck, ghost blocks)
+#   GhostBlock1 (64→128):   0.55 GOPS  (P2/4, 3x3 strided primary + 5x5 dw ghost)
+#   GhostBlock1 (128→256):  0.55 GOPS  (P3/8)
+#   GhostBlock1 (256→256):  0.40 GOPS  (P4/16)
+#   Head (Ghost PAN 3-scale):1.50 GOPS  (neck, ghost blocks — 1x1 primary)
 #   SDDetect (P2+P3+P4):    8.00 GOPS  (heads, 64ch — same as mid)
-#   TOTAL:                 ~13 GOPS at 1280x736
-#                          ~29 GOPS at 1920x1080
+#   TOTAL:                 ~14 GOPS at 1280x736
+#                          ~31 GOPS at 1920x1080
 #
 # Compared to mid model at same GOPS budget:
 #   Mid:   128ch backbone, 64ch head → 2,880 bits/pedestrian at P2
