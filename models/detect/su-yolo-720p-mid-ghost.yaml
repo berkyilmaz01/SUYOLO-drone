@@ -1,0 +1,55 @@
+# SU-YOLO 720p Mid Ghost — Ghost variant of su-yolo-720p-mid.yaml
+# 3-scale P2/P3/P4 with ghost convolutions → ~9 GOPS (vs ~15 normal)
+#
+# Train: python train.py --cfg models/detect/su-yolo-720p-mid-ghost.yaml \
+#          --data data/visdrone-mot.yaml --hyp data/hyps/hyp.visdrone.yaml \
+#          --img 1280 --batch 4 --time-step 1 --epochs 200 --cos-lr
+
+# parameters
+nc: 10
+depth_multiple: 1.0
+width_multiple: 1.0
+reg_max: 8
+
+# anchors
+anchors: 2
+
+# backbone (ghost)
+backbone:
+  [
+   [-1, 1, SGhostEncoderLite, [32, 3, 2]],  # 0-P1/2  32ch
+
+   [-1, 1, GhostBasicBlock1, [64, 64, 32, 1]],  # 1-P2/4  64ch
+
+   [-1, 1, GhostBasicBlock1, [128, 128, 64, 1]],  # 2-P3/8  128ch
+
+   [-1, 1, GhostBasicBlock1, [128, 128, 64, 1]],  # 3-P4/16  128ch
+  ]
+
+# head (ghost)
+head:
+  [
+   [ -1, 1, SGhostConv, [ 64, 1, 1 ] ],  # 4 — 128→64ch
+
+   [ -1, 1, SUpsample, [ 2 ] ],  # 5
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # 6 — cat → 192ch
+
+   [ -1, 1, GhostBasicBlock2, [ 64, 64, 32, 1 ] ],  # 7 (P3/8-medium) 64ch
+
+   [ -1, 1, SUpsample, [ 2 ] ],  # 8
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 9 — cat → 128ch
+
+   [ -1, 1, GhostBasicBlock2, [ 64, 64, 32, 1 ] ],  # 10 (P2/4-small) 64ch
+
+   [-1, 1, SGhostConv, [64, 3, 2]],  # 11
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # 12 — cat → 128ch
+
+   [ -1, 1, GhostBasicBlock2, [ 64, 64, 32, 1 ] ],  # 13 (P3/8-medium) 64ch
+
+   [-1, 1, SGhostConv, [64, 3, 2]],  # 14
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # 15 — cat → 128ch
+
+   [ -1, 1, GhostBasicBlock2, [ 64, 64, 32, 1 ] ],  # 16 (P4/16-large) 64ch
+
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+  ]

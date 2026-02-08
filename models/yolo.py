@@ -707,7 +707,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
             BasicBlock1, BasicBlock2, SEncoder, SEncoderLite, SConv, TransitionBlock, Conv, AConv, ConvTranspose, Bottleneck, SPP, SPPF,
-            DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown, RepNCSPELAN4, SPPELAN, ELAN1}:
+            DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown, RepNCSPELAN4, SPPELAN, ELAN1,
+            SGhostConv, SGhostEncoder, SGhostEncoderLite, GhostBasicBlock1, GhostBasicBlock2, GhostTransitionBlock}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)

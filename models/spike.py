@@ -439,6 +439,181 @@ def FindPoints(tensor,type):
     result = tensor + negative_points - positive_points
     return result
 
+###############################################################################
+# Ghost Convolution modules — drop-in spiking replacements for GhostNet-style
+# cheap feature generation.  Use via YAML configs (su-yolo-ghost-*.yaml).
+# Normal (non-ghost) models are UNCHANGED — these are purely additive.
+###############################################################################
+
+class SGhostConv(nn.Module):
+    """Spiking Ghost Convolution.
+
+    Produces c2 output channels from c1 input channels using:
+      1. Primary SConv(c1 → c_intrinsic, k, s)       — learns intrinsic features
+      2. Cheap   SConv(c_intrinsic → c_ghost, dw_k, 1, groups=c_intrinsic) — linear transform
+
+    Total output = cat(primary, cheap) = c_intrinsic + c_ghost = c2.
+    With ratio=2 this halves the FLOPs of a standard SConv.
+
+    Interface is identical to SConv: takes and returns list[Tensor] of length time_step.
+    """
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True,
+                 lif=None, step_mode='s', n=1.0, ratio=2, dw_k=3):
+        super().__init__()
+        c_intrinsic = math.ceil(c2 / ratio)          # primary channels
+        c_ghost = c2 - c_intrinsic                     # cheap channels
+
+        # Primary convolution — standard SConv
+        self.primary = SConv(c1, c_intrinsic, k, s, p, g, d, act, lif, step_mode, n)
+
+        # Cheap operation — depthwise SConv on intrinsic features
+        self.cheap = SConv(c_intrinsic, c_ghost, dw_k, 1, None, c_intrinsic, 1,
+                           act, lif, step_mode, n) if c_ghost > 0 else None
+
+    def forward(self, x):
+        p = self.primary(x)
+        if self.cheap is None:
+            return p
+        g = self.cheap(p)
+        return [torch.cat([p[i], g[i]], 1) for i in range(time_step)]
+
+
+class SGhostEncoder(nn.Module):
+    """Ghost version of SEncoder.
+    First conv uses SGhostConv (stride 1), second conv uses SGhostConv (stride 2)."""
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True,
+                 lif=None, step_mode='s', ratio=2, dw_k=3):
+        super().__init__()
+        self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(),
+                                         detach_reset=True, step_mode='s')
+        # First conv: stride 1
+        self.conv1 = SGhostConv(c1, c2, k, 1, p, g, d, act=False, ratio=ratio, dw_k=dw_k)
+        self.act1 = self.default_act if act is True else nn.Identity()
+        # Second conv: stride 2  (regular SConv — ghost on stride-2 is less effective)
+        self.conv2 = SConv(c2, c2, k, 2, p, g, d, act=True)
+
+    def forward(self, x):
+        x = [x for _ in range(time_step)]
+        out = self.conv1(x)
+        out = [self.act1(out[i]) for i in range(time_step)]
+        out = self.conv2(out)
+        return out
+
+
+class SGhostEncoderLite(nn.Module):
+    """Ghost version of SEncoderLite.
+    Stride 2 FIRST (cheap at Cin=3), then ghost conv at half resolution."""
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True,
+                 lif=None, step_mode='s', ratio=2, dw_k=3):
+        super().__init__()
+        self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(),
+                                         detach_reset=True, step_mode='s')
+        # Stride 2 first — regular SConv (cheap at Cin=3, ghost overhead not worth it)
+        self.conv1 = SConv(c1, c2, k, 2, p, g, d, act=True)
+        # Stride 1 at half-res — ghost conv saves FLOPs here
+        self.conv2 = SGhostConv(c2, c2, k, 1, p, g, d, act=True, ratio=ratio, dw_k=dw_k)
+
+    def forward(self, x):
+        x = [x for _ in range(time_step)]
+        out = self.conv1(x)
+        out = self.conv2(out)
+        return out
+
+
+class GhostBasicBlock1(nn.Module):
+    """Ghost version of BasicBlock1 (CSP-ELAN with stride 2).
+    Replaces internal SConv with SGhostConv for ~2x fewer FLOPs."""
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cvres = SGhostConv(c1, c2 // 2, 1, 2, act=False, n=2)
+        self.cv0 = SGhostConv(c1, c2, 3, 2, act=False)
+        self.cv2 = SGhostConv(c4, c4, 3, 1, act=False, n=2)
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.c = c4
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        xres = self.cvres(x)
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        for i in range(time_step):
+            x4[i] = x4[i] + xres[i]
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
+        return out
+
+
+class GhostBasicBlock2(nn.Module):
+    """Ghost version of BasicBlock2 (CSP-ELAN, no stride).
+    Replaces internal SConv with SGhostConv for ~2x fewer FLOPs."""
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cv0 = SGhostConv(c1, c2, 1, 1, act=False)
+        self.cv2 = SGhostConv(c4, c4, 3, 1, act=False)
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
+        return out
+
+
+class GhostTransitionBlock(nn.Module):
+    """Ghost version of TransitionBlock (SPP-ELAN).
+    Replaces the 1x1 projection and final SConv with ghost variants."""
+    def __init__(self, c1, c2, c3):
+        super().__init__()
+        self.c = c3
+        self.conv = layer.Conv2d(c1, c3, 1, 1)
+        self.bn = seBatchNorm(c3, time_step)
+        self.act = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                 detach_reset=True, step_mode='s')
+        self.cv2 = SSP(5)
+        self.cv3 = SSP(5)
+        self.cv5 = SGhostConv(3 * c3, c2, 1, 1)
+
+    def forward(self, x):
+        x = [self.conv(x[i]) for i in range(time_step)]
+        x = self.bn(x)
+        y = [x]
+        y.extend(m(y[-1]) for m in [self.cv2, self.cv3])
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act(out[i]) for i in range(time_step)]
+        out = self.cv5(out)
+        return out
+
+
 class seBatchNorm(nn.Module):
     def __init__(self,c,t,n=1.0):
         super(seBatchNorm, self).__init__()

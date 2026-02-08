@@ -1,0 +1,56 @@
+# SU-YOLO Ghost — Ghost Convolution variant of su-yolo.yaml
+# Uses SGhostConv / GhostBasicBlock1/2 / GhostTransitionBlock for ~2x fewer FLOPs.
+# Same architecture topology, same channel widths — only internal convolutions are ghosted.
+#
+# Train: python train.py --cfg models/detect/su-yolo-ghost.yaml \
+#          --data data/visdrone.yaml --img 736 --batch 16
+# Compare: train su-yolo.yaml with identical settings to measure ghost vs normal.
+
+# parameters
+nc: 10  # number of classes (overridden by data yaml at runtime)
+depth_multiple: 1.0
+width_multiple: 1.0
+
+# anchors
+anchors: 2
+
+# gelan backbone (ghost)
+backbone:
+  [
+   # ghost encoder (replaces SEncoder)
+   [-1, 1, SGhostEncoder, [64, 3, 2]],  # 0-P1/2
+
+   # ghost elan-1 block
+   [-1, 1, GhostBasicBlock1, [128, 128, 64, 1]],  # 1
+
+   # ghost elan-2 block
+   [-1, 1, GhostBasicBlock1, [256, 256, 128, 1]],  # 2
+
+   # ghost elan-2 block
+   [-1, 1, GhostBasicBlock1, [512, 512, 256, 1]],  # 3
+  ]
+
+# gelan head (ghost)
+head:
+  [
+    # ghost spp-elan block
+   [ -1, 1, GhostTransitionBlock, [ 512, 256 ] ],  # 4
+
+    # up-concat merge
+   [ -1, 1, SUpsample, [ 2 ] ],
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # cat backbone P4
+
+    # ghost elan-2 block
+   [ -1, 1, GhostBasicBlock2, [ 256, 256, 128, 1 ] ],  # 7 (P3/16-medium)
+
+    # avg-conv-down merge (SGhostConv as downsampler)
+   [-1, 1, SGhostConv, [256, 3, 2]],
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # cat head P5
+
+    # ghost elan-2 block
+   [ -1, 1, GhostBasicBlock2, [ 256, 256, 128, 1 ] ],  # 10 (P4/32-large)
+
+    # detect (SDDetect is shared — it already uses SDConv for temporal averaging)
+   [ [ 7, 10 ], 1, SDDetect, [ nc ] ],  # SDDetect(P3, P4)
+
+  ]
