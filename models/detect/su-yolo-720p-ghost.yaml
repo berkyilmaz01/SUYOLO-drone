@@ -1,0 +1,53 @@
+# SU-YOLO 720p Ghost — Ghost Convolution variant of su-yolo-720p.yaml
+# 3-scale detection (P2/P3/P4) with ghost convolutions for ~2x fewer FLOPs.
+#
+# Train: python train.py --cfg models/detect/su-yolo-720p-ghost.yaml \
+#          --data data/visdrone.yaml --img 736 --batch 16
+
+# parameters
+nc: 10
+depth_multiple: 1.0
+width_multiple: 1.0
+
+# anchors
+anchors: 2
+
+# gelan backbone (ghost)
+backbone:
+  [
+   [-1, 1, SGhostEncoder, [64, 3, 2]],  # 0-P1/2
+
+   [-1, 1, GhostBasicBlock1, [128, 128, 64, 1]],  # 1-P2/4
+
+   [-1, 1, GhostBasicBlock1, [256, 256, 128, 1]],  # 2-P3/8
+
+   [-1, 1, GhostBasicBlock1, [512, 512, 256, 1]],  # 3-P4/16
+  ]
+
+# gelan head (ghost)
+head:
+  [
+   [ -1, 1, GhostTransitionBlock, [ 512, 256 ] ],  # 4
+
+   [ -1, 1, SUpsample, [ 2 ] ],
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # cat backbone P3
+
+   [ -1, 1, GhostBasicBlock2, [ 256, 256, 128, 1 ] ],  # 7 (P3/8-medium)
+
+   [ -1, 1, SUpsample, [ 2 ] ],
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # cat backbone P2
+
+   [ -1, 1, GhostBasicBlock2, [ 128, 128, 64, 1 ] ],  # 10 (P2/4-small)
+
+   [-1, 1, SGhostConv, [256, 3, 2]],
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # cat head P3
+
+   [ -1, 1, GhostBasicBlock2, [ 256, 256, 128, 1 ] ],  # 13 (P3/8-medium)
+
+   [-1, 1, SGhostConv, [256, 3, 2]],
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # cat head P4
+
+   [ -1, 1, GhostBasicBlock2, [ 256, 256, 128, 1 ] ],  # 16 (P4/16-large)
+
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+  ]

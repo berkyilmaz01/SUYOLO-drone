@@ -1,0 +1,50 @@
+# SU-YOLO 720p Nano Ghost — Ghost variant of su-yolo-720p-nano.yaml
+# Lightest model: 16→32→64 channels + ghost convolutions → ~2.5 GOPS
+#
+# GOPS estimate at 1280x736, time_step=1:
+#   SGhostEncoderLite (3→16):  ~0.40 GOPS  (stem, ghost on 2nd conv)
+#   GhostBasicBlock1 (16→32):  ~0.25 GOPS  (P2/4)
+#   GhostBasicBlock1 (32→64):  ~0.25 GOPS  (P3/8)
+#   Head (FPN + GBB2):         ~0.30 GOPS  (neck)
+#   SDDetect (P2+P3):          ~2.21 GOPS  (heads, unchanged)
+#   TOTAL:                    ~3.4 GOPS
+#
+# Train: python train.py --cfg models/detect/su-yolo-720p-nano-ghost.yaml \
+#          --data data/visdrone.yaml --img 736 --batch 32 --time-step 1
+
+# parameters
+nc: 10
+depth_multiple: 1.0
+width_multiple: 1.0
+reg_max: 8
+
+# anchors
+anchors: 2
+
+# backbone (ghost)
+backbone:
+  [
+   [-1, 1, SGhostEncoderLite, [16, 3, 2]],  # 0-P1/2  16ch
+
+   [-1, 1, GhostBasicBlock1, [32, 32, 16, 1]],  # 1-P2/4  32ch
+
+   [-1, 1, GhostBasicBlock1, [64, 64, 32, 1]],  # 2-P3/8  64ch
+  ]
+
+# head (ghost)
+head:
+  [
+   [ -1, 1, SGhostConv, [ 32, 1, 1 ] ],  # 3 — 64→32ch
+
+   [ -1, 1, SUpsample, [ 2 ] ],  # 4
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 5 — cat → 64ch
+
+   [ -1, 1, GhostBasicBlock2, [ 32, 32, 16, 1 ] ],  # 6 (P2/4-small) 32ch
+
+   [-1, 1, SGhostConv, [32, 3, 2]],  # 7
+   [ [ -1, 3 ], 1, SConcat, [ 1 ] ],  # 8 — cat → 64ch
+
+   [ -1, 1, GhostBasicBlock2, [ 32, 32, 16, 1 ] ],  # 9 (P3/8-medium) 32ch
+
+   [ [ 6, 9 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3)
+  ]
