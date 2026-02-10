@@ -9,11 +9,14 @@ Expects:
     val/    val_coco.json, hazy_images/
     test/   test_coco.json, hazy_images/
 
-Produces YOLO labels next to hazy_images:
+Produces YOLO labels and an 'images' symlink for each split:
   data-root/
     train/  labels/  (one .txt per image)
+            images -> hazy_images  (symlink for YOLO label resolution)
     val/    labels/
+            images -> hazy_images
     test/   labels/
+            images -> hazy_images
 """
 import argparse
 import json
@@ -88,6 +91,15 @@ def convert_split(split_dir):
         count += 1
 
     print(f"  Wrote {count} label files to {labels_dir}")
+
+    # Create 'images' symlink -> 'hazy_images' so YOLO img2label_paths
+    # can resolve /images/ -> /labels/ correctly.
+    images_link = split_dir / "images"
+    hazy_dir = split_dir / "hazy_images"
+    if hazy_dir.exists() and not images_link.exists():
+        images_link.symlink_to("hazy_images")
+        print(f"  Created symlink {images_link} -> hazy_images")
+
     return count
 
 
