@@ -45,7 +45,9 @@ def count_gops(cfg, imgsz, time_step_val):
             # Use from_idx if available
             f = m.f if hasattr(m, 'f') else -1
             if isinstance(f, list):
-                inp_h, inp_w = spatial[f[0]]
+                # Resolve relative indices
+                resolved = [i + x if x < 0 else x for x in f]
+                inp_h, inp_w = spatial[resolved[0]]
             elif isinstance(f, int):
                 src = i + f if f < 0 else f
                 inp_h, inp_w = spatial[src]
