@@ -3,10 +3,10 @@
 # 3 classes, COCO annotations converted to YOLO format
 # Uses hazy_images for training (degraded visibility challenge)
 
-path: /home/ubuntu/HazyDet
-train: train/hazy_images
-val: val/hazy_images
-test: test/hazy_images
+path: ../HazyDet
+train: train/images
+val: val/images
+test: test/images
 
 nc: 3
 names:
