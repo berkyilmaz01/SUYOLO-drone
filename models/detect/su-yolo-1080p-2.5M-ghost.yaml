@@ -1,0 +1,62 @@
+# SU-YOLO 1080p 2.5M Ghost — high-capacity ghost model for 1920x1080
+# Scaled from su-yolo-720p-mid-ghost.yaml (545K → ~2.5M)
+# 3-scale P2/P3/P4 with ghost convolutions
+#
+# Target: ZCU102 custom SNN-HLS, <10ms latency, 60+ FPS @ 1920x1080
+# mAP50 target: 0.60+ on HazyDet clean
+#
+# Backbone: 64→128→256→512 (ghost) — same as su-yolo-720p-ghost.yaml
+# Head: 128ch (simplified PAN, no SPP — FPGA-friendly)
+#
+# Train: python train.py --cfg models/detect/su-yolo-1080p-2.5M-ghost.yaml \
+#          --data data/hazydet.yaml --hyp data/hyps/hyp.visdrone.yaml \
+#          --img 1920 --batch 2 --time-step 1 --epochs 200 --cos-lr
+
+# parameters
+nc: 10
+depth_multiple: 1.0
+width_multiple: 1.0
+reg_max: 8
+
+# anchors
+anchors: 2
+
+# backbone (ghost) — 64→128→256→512
+backbone:
+  [
+   [-1, 1, SGhostEncoderLite, [64, 3, 2]],  # 0-P1/2  64ch
+
+   [-1, 1, GhostBasicBlock1, [128, 128, 64, 1]],  # 1-P2/4  128ch
+
+   [-1, 1, GhostBasicBlock1, [256, 256, 128, 1]],  # 2-P3/8  256ch
+
+   [-1, 1, GhostBasicBlock1, [512, 512, 256, 1]],  # 3-P4/16  512ch
+  ]
+
+# head (ghost) — 128ch, no SPP (FPGA-friendly)
+head:
+  [
+   [ -1, 1, SGhostConv, [ 128, 1, 1 ] ],  # 4 — 512→128ch
+
+   [ -1, 1, SUpsample, [ 2 ] ],  # 5
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # 6 — cat → 384ch
+
+   [ -1, 1, GhostBasicBlock2, [ 128, 128, 64, 1 ] ],  # 7 (P3/8-medium) 128ch
+
+   [ -1, 1, SUpsample, [ 2 ] ],  # 8
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 9 — cat → 256ch
+
+   [ -1, 1, GhostBasicBlock2, [ 128, 128, 64, 1 ] ],  # 10 (P2/4-small) 128ch
+
+   [-1, 1, SGhostConv, [128, 3, 2]],  # 11
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # 12 — cat → 256ch
+
+   [ -1, 1, GhostBasicBlock2, [ 128, 128, 64, 1 ] ],  # 13 (P3/8-medium) 128ch
+
+   [-1, 1, SGhostConv, [128, 3, 2]],  # 14
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # 15 — cat → 256ch
+
+   [ -1, 1, GhostBasicBlock2, [ 128, 128, 64, 1 ] ],  # 16 (P4/16-large) 128ch
+
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+  ]
