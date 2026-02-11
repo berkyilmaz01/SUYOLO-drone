@@ -324,23 +324,29 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(amp):
-                #imgs = imgs.repeat(time_step, 1, 1, 1, 1)
-                #img_list = [imgs for _ in range(time_step)]
-                #print(imgs.shape)
+            try:
+                with torch.cuda.amp.autocast(amp):
+                    #imgs = imgs.repeat(time_step, 1, 1, 1, 1)
+                    #img_list = [imgs for _ in range(time_step)]
+                    #print(imgs.shape)
 
-                pred = model(imgs)  # forward
-                #imgs = imgs[0]
-                torch.use_deterministic_algorithms(False)
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                #print(loss)
-                if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
+                    pred = model(imgs)  # forward
+                    #imgs = imgs[0]
+                    torch.use_deterministic_algorithms(False)
+                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    #print(loss)
+                    if RANK != -1:
+                        loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.
 
-            # Backward
-            scaler.scale(loss).backward()
+                # Backward
+                scaler.scale(loss).backward()
+            except torch.cuda.OutOfMemoryError:
+                LOGGER.warning(f'WARNING ⚠️ OOM in batch {i}, skipping...')
+                torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                continue
 
             # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
             if ni - last_opt_step >= accumulate:
