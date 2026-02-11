@@ -1,0 +1,17 @@
+# HazyDet — Hazy (degraded) images variant
+# Train on hazy/foggy images instead of clean images
+# Uses symlinked directories: hazy_train/images -> ../train/hazy_images, etc.
+# Labels are also symlinked:  hazy_train/labels -> ../train/labels
+#
+# Run tools/setup_hazy_symlinks.py first to create the symlink structure.
+
+path: ../HazyDet
+train: hazy_train/images
+val: hazy_val/images
+test: hazy_test/images
+
+nc: 3
+names:
+  0: car
+  1: truck
+  2: bus
