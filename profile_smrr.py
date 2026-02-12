@@ -36,7 +36,7 @@ from utils.metrics import box_iou
 from utils.torch_utils import select_device
 from spikingjelly.activation_based.functional import reset_net
 from spikingjelly.activation_based import neuron
-from models.spike import set_time_step
+from models.spike import set_time_step, BasicBlock1, BasicBlock2, GhostBasicBlock1, GhostBasicBlock2
 
 import matplotlib
 matplotlib.use('Agg')
@@ -53,28 +53,29 @@ class MembraneVoltageProfiler:
         self._attach_hooks(model)
 
     def _attach_hooks(self, model):
-        """Find ALL IFNode instances and hook them."""
+        """Hook act3 IFNodes inside BasicBlock1/BasicBlock2 — these are the ELAN
+        block outputs that feed the detection head.  Do NOT hook encoder/stem IFNodes
+        (they're too early in the network to be meaningful for detection)."""
+        elan_types = (BasicBlock1, BasicBlock2, GhostBasicBlock1, GhostBasicBlock2)
+
         for name, module in model.named_modules():
-            if isinstance(module, neuron.IFNode):
-                layer_name = name
+            if isinstance(module, elan_types) and hasattr(module, 'act3'):
+                act3 = module.act3
+                layer_name = f'{name}.act3'
                 self.voltage_snapshots[layer_name] = []
 
                 def make_hook(lname):
                     def hook_fn(m, inp, out):
-                        # m.v holds post-reset membrane potential
-                        # For non-firing neurons: v = accumulated voltage (sub-threshold)
-                        # For firing neurons: v = 0 (hard reset)
                         v = m.v
                         if isinstance(v, torch.Tensor):
                             self.voltage_snapshots[lname].append(v.detach().cpu().clone())
-                        # else: v is scalar (0.0 after reset) — skip
                     return hook_fn
 
-                h = module.register_forward_hook(make_hook(layer_name))
+                h = act3.register_forward_hook(make_hook(layer_name))
                 self.hooks.append(h)
                 self.hook_count += 1
 
-        LOGGER.info(f'  Attached {self.hook_count} hooks on IFNode instances')
+        LOGGER.info(f'  Attached {self.hook_count} hooks on BasicBlock act3 IFNodes')
         for name in self.voltage_snapshots:
             LOGGER.info(f'    - {name}')
 
@@ -271,10 +272,9 @@ def run_profiling(
                 profiler.remove_hooks()
                 return
 
-            # Pick layers with largest spatial dims (best for small objects)
-            sorted_layers = sorted(layer_sizes.items(), key=lambda x: -x[1])
-            # Use top-2 largest spatial layers (likely the FPN outputs before detect)
-            best_layers = [name for name, _ in sorted_layers[:2]]
+            # Use ALL BasicBlock act3 layers — each GT box is matched to
+            # the layer whose spatial resolution best fits the object size
+            best_layers = list(layer_sizes.keys())
             LOGGER.info(f'  Using layers: {best_layers}')
 
             # Debug target info
@@ -321,8 +321,10 @@ def run_profiling(
             fn_mask = ~matched
             tp_mask = matched
 
-            # Extract voltage from the best layers
-            collected_for_this_image = False
+            # Extract voltage — take MAX voltage across ALL hooked layers
+            # per GT box (the layer where the object left the strongest trace)
+            per_box_best_v = torch.zeros(n_gt)
+
             for layer_name in (best_layers or voltages.keys()):
                 v_list = voltages.get(layer_name, [])
                 if len(v_list) == 0:
@@ -332,22 +334,22 @@ def run_profiling(
                 gy, gx = map_boxes_to_feature_grid(tbox_px, (height, width), (feat_h, feat_w))
                 v_max = extract_voltage_at_locations(v_list, gy, gx, si=si)
 
-                for i in range(n_gt):
-                    cls_id = gt_classes[i].item()
-                    area = box_areas[i].item()
-                    v = v_max[i].item()
+                # Keep the best (highest) voltage seen across layers
+                per_box_best_v = torch.max(per_box_best_v, v_max)
 
-                    if fn_mask[i]:
-                        fn_voltages.append(v)
-                        fn_voltages_by_class[cls_id].append(v)
-                        fn_box_areas.append(area)
-                    elif tp_mask[i]:
-                        tp_voltages.append(v)
-                        tp_voltages_by_class[cls_id].append(v)
-                        tp_box_areas.append(area)
+            for i in range(n_gt):
+                cls_id = gt_classes[i].item()
+                area = box_areas[i].item()
+                v = per_box_best_v[i].item()
 
-                collected_for_this_image = True
-                break  # use the first (largest) available layer
+                if fn_mask[i]:
+                    fn_voltages.append(v)
+                    fn_voltages_by_class[cls_id].append(v)
+                    fn_box_areas.append(area)
+                elif tp_mask[i]:
+                    tp_voltages.append(v)
+                    tp_voltages_by_class[cls_id].append(v)
+                    tp_box_areas.append(area)
 
         reset_net(inner_model)
 
