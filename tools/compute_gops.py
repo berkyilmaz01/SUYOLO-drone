@@ -41,34 +41,43 @@ def profile_model(cfg, imgsz, time_step_val):
     print(f"Time step: {time_step_val}")
     print(f"Parameters: {total_params:,} ({total_params/1e6:.2f}M)")
 
-    # Use thop for accurate FLOPS count if available
-    try:
-        from thop import profile as thop_profile
-        inp = torch.randn(1, 3, imgsz[0], imgsz[1])
-        flops, params = thop_profile(model, inputs=(inp,), verbose=False)
-        gops = flops * 2 / 1e9  # thop returns MACs, multiply by 2 for OPS
-        print(f"GOPS (thop): {gops:.2f}")
-        print(f"GOPS per time_step: {gops:.2f} (time_step={time_step_val})")
-    except ImportError:
-        # Fallback: estimate from forward pass timing
-        inp = torch.randn(1, 3, imgsz[0], imgsz[1])
-        import time
-        # Warmup
-        for _ in range(3):
-            with torch.no_grad():
-                model(inp)
-        # Time
-        times = []
-        for _ in range(10):
-            from spikingjelly.activation_based.functional import reset_net
-            reset_net(model)
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                model(inp)
-            times.append(time.perf_counter() - t0)
-        avg_ms = sum(times) / len(times) * 1000
-        print(f"thop not installed, skipping GOPS count")
-        print(f"CPU inference time: {avg_ms:.1f}ms (avg of 10 runs)")
+    # Count FLOPs via forward hooks (thop breaks on SNN IFNode layers)
+    from spikingjelly.activation_based.functional import reset_net
+    import torch.nn as nn
+
+    total_macs = [0]  # mutable to allow hook access
+    hooks = []
+
+    def make_hook(mod):
+        def hook_fn(m, inp, out):
+            if isinstance(m, nn.Conv2d):
+                # inp[0] shape: [B, C_in, H, W]
+                _, _, H, W = inp[0].shape
+                Cout, Cin_per_g, Kh, Kw = m.weight.shape
+                s = m.stride if isinstance(m.stride, tuple) else (m.stride, m.stride)
+                Ho = H // s[0]
+                Wo = W // s[1]
+                total_macs[0] += Kh * Kw * Cin_per_g * Cout * Ho * Wo
+            elif isinstance(m, nn.Linear):
+                total_macs[0] += m.in_features * m.out_features
+        return hook_fn
+
+    for m in model.modules():
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            hooks.append(m.register_forward_hook(make_hook(m)))
+
+    inp = torch.randn(1, 3, imgsz[0], imgsz[1])
+    reset_net(model)
+    with torch.no_grad():
+        model(inp)
+
+    for h in hooks:
+        h.remove()
+
+    gflops = total_macs[0] * 2 / 1e9  # MACs × 2 = FLOPs, then /1e9 = GFLOPs
+    gops = gflops
+    print(f"GFLOPs: {gflops:.2f}")
+    print(f"GFLOPs per time_step: {gflops:.2f} (time_step={time_step_val})")
 
     # ZCU102 FPS estimate
     # Conservative: assume 60% DPU utilization due to memory bandwidth
