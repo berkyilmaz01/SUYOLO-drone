@@ -1,7 +1,7 @@
 """
 Generate a 30 FPS detection demo video from test-set images.
 
-Usage:
+Usage (single pass — one frame per image):
     python make_demo_video.py \
         --weights runs/train/hazydet/weights/best.pt \
         --source ../HazyDet/test/images \
@@ -10,13 +10,26 @@ Usage:
         --conf-thres 0.25 \
         --output runs/demo/hazydet_demo.mp4
 
+Usage (2-minute video — cycles images to fill duration):
+    python make_demo_video.py \
+        --weights results/hazydet/hazydet5_1920_ghost/weights/best.pt \
+        --source ../HazyDet/test/images \
+        --data data/hazydet.yaml \
+        --imgsz 1920 1920 \
+        --conf-thres 0.25 \
+        --fps 30 --duration 120 \
+        --time-step 1 \
+        --output runs/demo/hazydet_2min.mp4
+
 The script runs SUYOLO inference on every image in --source (sorted by
 filename), draws bounding boxes with class labels and confidence, overlays
 a compact HUD (frame counter, detection stats, model info), and writes
-all frames into a single MP4 video at 30 FPS.
+all frames into a single MP4 video.  With --duration, images are cycled
+to fill the requested video length.
 """
 
 import argparse
+import itertools
 import os
 import sys
 import time
@@ -168,7 +181,14 @@ def run(opt):
     if not image_paths:
         LOGGER.error("No images found — aborting.")
         return
-    total = len(image_paths)
+
+    # duration mode: cycle images to fill requested seconds
+    if opt.duration > 0:
+        total = opt.fps * opt.duration
+        LOGGER.info(f"Duration mode: {opt.fps} fps x {opt.duration}s = {total} frames "
+                     f"(cycling {len(image_paths)} images)")
+    else:
+        total = len(image_paths)
 
     # ── determine output resolution from first image ──────────────────
     sample = cv2.imread(str(image_paths[0]))
@@ -191,8 +211,14 @@ def run(opt):
     LOGGER.info(f"Writing {total} frames → {output}  ({out_w}x{out_h} @ {fps} FPS)")
 
     # ── inference loop ────────────────────────────────────────────────
+    # cycle infinitely when in duration mode, otherwise single pass
+    if opt.duration > 0:
+        frame_iter = itertools.islice(itertools.cycle(image_paths), total)
+    else:
+        frame_iter = iter(image_paths)
+
     t_total = time.time()
-    for idx, img_path in enumerate(image_paths):
+    for idx, img_path in enumerate(frame_iter):
         # read original image
         im0 = cv2.imread(str(img_path))
         if im0 is None:
@@ -261,6 +287,7 @@ def parse_opt():
     p.add_argument("--half", action="store_true", help="FP16 inference")
     p.add_argument("--output", type=str, default="runs/demo/hazydet_demo.mp4", help="Output video path")
     p.add_argument("--fps", type=int, default=30, help="Video frame rate")
+    p.add_argument("--duration", type=int, default=0, help="Video duration in seconds (0 = one pass through all images)")
     p.add_argument("--max-video-dim", type=int, default=1920, help="Cap output video resolution")
     p.add_argument("--time-step", type=int, default=4, help="SNN time steps")
     opt = p.parse_args()
