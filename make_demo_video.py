@@ -45,11 +45,10 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from models.common import DetectMultiBackend
-from utils.dataloaders import IMG_FORMATS
+from utils.dataloaders import IMG_FORMATS, letterbox
 from utils.general import (
     LOGGER,
     check_img_size,
-    letterbox,
     non_max_suppression,
     scale_boxes,
 )
