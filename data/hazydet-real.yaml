@@ -11,9 +11,9 @@
 #       --data-real data/hazydet-real.yaml --stage 2
 
 path: ../HazyDet
-train: real_train/images
-val: real_test/images       # real-world test set used for validation
-test: real_test/images
+train: real_world/train/images
+val: real_world/test/images       # real-world test set used for validation
+test: real_world/test/images
 
 nc: 3
 names:
