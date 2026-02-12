@@ -1,3 +1,5 @@
+import json
+import logging
 import math
 import warnings
 from pathlib import Path
@@ -7,6 +9,8 @@ import numpy as np
 import torch
 
 from utils import TryExcept, threaded
+
+LOGGER = logging.getLogger(__name__)
 
 
 def fitness(x):
@@ -98,6 +102,14 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir='.', names
         plot_mc_curve(px, r, Path(save_dir) / f'{prefix}R_curve.png', names, ylabel='Recall')
 
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
+
+    # Adaptive per-class F1-optimal confidence thresholds
+    per_class_conf = {}
+    for ci in range(nc):
+        ci_best = smooth(f1[ci], 0.1).argmax()
+        per_class_conf[names.get(ci, ci)] = round(float(px[ci_best]), 3)
+    global_conf = round(float(px[i]), 3)
+
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
     fp = (tp / (p + eps) - tp).round()  # false positives
@@ -112,6 +124,12 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir='.', names
     # 保存为 JSON 文件
     with open(Path(save_dir) / f'{prefix}pr.json', 'w') as f:
         json.dump(data, f, indent=4)
+
+    # Save adaptive per-class confidence thresholds
+    adaptive_data = {"global": global_conf, "per_class": per_class_conf}
+    with open(Path(save_dir) / f'{prefix}adaptive_conf.json', 'w') as f:
+        json.dump(adaptive_data, f, indent=4)
+    LOGGER.info(f'Adaptive conf thresholds: {adaptive_data}')
 
     return tp, fp, p, r, f1, ap, unique_classes.astype(int)
 
