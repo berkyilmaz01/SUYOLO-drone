@@ -4,7 +4,7 @@ Answers the question: "What fraction of missed objects are threshold-limited (re
 
 Usage:
     python profile_smrr.py --weights results/hazydet/hazydet4/weights/best.pt \
-                           --data data/hazydet.yaml --img 640 --time-step 4
+                           --data data/hazydet.yaml --img 640 --time-step 1
 
 Output:
     - Histogram of max sub-threshold voltage at FN vs TP locations
@@ -17,7 +17,6 @@ import os
 import sys
 from pathlib import Path
 from collections import defaultdict
-from copy import deepcopy
 
 import numpy as np
 import torch
@@ -37,7 +36,7 @@ from utils.metrics import box_iou
 from utils.torch_utils import select_device
 from spikingjelly.activation_based.functional import reset_net
 from spikingjelly.activation_based import neuron
-from models.spike import set_time_step, BasicBlock2, BasicBlock1
+from models.spike import set_time_step
 
 import matplotlib
 matplotlib.use('Agg')
@@ -45,38 +44,47 @@ import matplotlib.pyplot as plt
 
 
 class MembraneVoltageProfiler:
-    """Hooks into IFNode.act3 of BasicBlock2 layers to capture membrane voltages
-    across all timesteps."""
+    """Hooks into ALL IFNode instances in the model to capture membrane voltages."""
 
     def __init__(self, model):
         self.hooks = []
-        self.voltage_snapshots = {}  # layer_name → list of [T tensors]
+        self.voltage_snapshots = {}  # layer_name → list of (v_tensor, shape) tuples
+        self.hook_count = 0
         self._attach_hooks(model)
 
     def _attach_hooks(self, model):
-        """Find all BasicBlock2 (and BasicBlock1) act3 IFNodes that feed SDDetect."""
+        """Find ALL IFNode instances and hook them."""
         for name, module in model.named_modules():
-            if isinstance(module, (BasicBlock2, BasicBlock1)):
-                act3 = module.act3
+            if isinstance(module, neuron.IFNode):
                 layer_name = name
                 self.voltage_snapshots[layer_name] = []
 
                 def make_hook(lname):
                     def hook_fn(m, inp, out):
-                        # After each IFNode forward call (one per timestep),
-                        # m.v holds the post-reset membrane potential.
+                        # m.v holds post-reset membrane potential
                         # For non-firing neurons: v = accumulated voltage (sub-threshold)
                         # For firing neurons: v = 0 (hard reset)
-                        self.voltage_snapshots[lname].append(m.v.detach().clone())
+                        v = m.v
+                        if isinstance(v, torch.Tensor):
+                            self.voltage_snapshots[lname].append(v.detach().cpu().clone())
+                        # else: v is scalar (0.0 after reset) — skip
                     return hook_fn
 
-                h = act3.register_forward_hook(make_hook(layer_name))
+                h = module.register_forward_hook(make_hook(layer_name))
                 self.hooks.append(h)
-                LOGGER.info(f'  Hooked: {layer_name}.act3')
+                self.hook_count += 1
+
+        LOGGER.info(f'  Attached {self.hook_count} hooks on IFNode instances')
+        for name in self.voltage_snapshots:
+            LOGGER.info(f'    - {name}')
 
     def get_voltages(self):
-        """Return captured voltages as {layer_name: [v_t1, v_t2, ..., v_tT]}."""
-        return deepcopy(self.voltage_snapshots)
+        """Return captured voltages (already on CPU)."""
+        # Return direct reference — no deepcopy needed since we clone+cpu in hook
+        result = {}
+        for k, v_list in self.voltage_snapshots.items():
+            result[k] = list(v_list)  # shallow copy of list
+        return result
 
     def clear(self):
         """Clear captured voltages for next batch."""
@@ -93,17 +101,17 @@ def map_boxes_to_feature_grid(boxes, img_shape, feat_shape):
     """Map bounding box centers from image space to feature map grid cells.
 
     Args:
-        boxes: [N, 4] xyxy in image pixel coords
+        boxes: [N, 4] xyxy in image pixel coords (can be on any device)
         img_shape: (H_img, W_img)
         feat_shape: (H_feat, W_feat)
 
     Returns:
-        grid_y, grid_x: [N] integer grid coordinates
+        grid_y, grid_x: [N] integer grid coordinates (CPU)
     """
-    cx = (boxes[:, 0] + boxes[:, 2]) / 2  # center x
-    cy = (boxes[:, 1] + boxes[:, 3]) / 2  # center y
+    boxes_cpu = boxes.detach().cpu().float()
+    cx = (boxes_cpu[:, 0] + boxes_cpu[:, 2]) / 2
+    cy = (boxes_cpu[:, 1] + boxes_cpu[:, 3]) / 2
 
-    # Scale to feature map
     scale_x = feat_shape[1] / img_shape[1]
     scale_y = feat_shape[0] / img_shape[0]
 
@@ -113,34 +121,39 @@ def map_boxes_to_feature_grid(boxes, img_shape, feat_shape):
     return grid_y, grid_x
 
 
-def extract_voltage_at_locations(voltages_per_layer, grid_y, grid_x):
-    """Extract max-over-time, mean-over-channel voltage at given grid locations.
+def extract_voltage_at_locations(voltages_list, grid_y, grid_x, si=0):
+    """Extract mean-over-channel voltage at given grid locations.
 
     Args:
-        voltages_per_layer: list of T tensors, each [B, C, H, W] (single image → B=1 slice)
-        grid_y, grid_x: [N] grid coordinates
+        voltages_list: list of T tensors (CPU), each [B, C, H, W] or [C, H, W]
+        grid_y, grid_x: [N] grid coordinates (CPU)
+        si: batch image index
 
     Returns:
-        v_max: [N] max sub-threshold voltage across timesteps at each location
+        v_max: [N] max sub-threshold voltage across timesteps
     """
-    if len(voltages_per_layer) == 0 or len(grid_y) == 0:
+    if len(voltages_list) == 0 or len(grid_y) == 0:
         return torch.zeros(len(grid_y))
 
-    T = len(voltages_per_layer)
+    T = len(voltages_list)
     N = len(grid_y)
-
     v_at_locs = torch.zeros(T, N)
-    for t in range(T):
-        v_t = voltages_per_layer[t]  # [B, C, H, W] or [C, H, W]
-        if v_t.dim() == 4:
-            v_t = v_t[0]  # take first image in batch slice (we pass single image)
-        # Mean over channels at each grid location
-        for n in range(N):
-            gy, gx = grid_y[n].item(), grid_x[n].item()
-            if gy < v_t.shape[1] and gx < v_t.shape[2]:
-                v_at_locs[t, n] = v_t[:, gy, gx].mean()
 
-    # Max voltage across timesteps (the "closest miss")
+    for t in range(T):
+        v_t = voltages_list[t]
+        # Handle different dims
+        if v_t.dim() == 4:
+            v_t = v_t[si]  # [C, H, W]
+        if v_t.dim() != 3:
+            continue
+
+        C, H, W = v_t.shape
+        for n in range(N):
+            gy = grid_y[n].item()
+            gx = grid_x[n].item()
+            if 0 <= gy < H and 0 <= gx < W:
+                v_at_locs[t, n] = v_t[:, gy, gx].float().mean().item()
+
     v_max, _ = v_at_locs.max(dim=0)
     return v_max
 
@@ -185,23 +198,33 @@ def run_profiling(
         prefix=colorstr('profile: ')
     )[0]
 
-    # Attach profiler hooks
-    LOGGER.info('Attaching membrane voltage hooks...')
+    # Attach profiler hooks — search ALL nesting levels
+    LOGGER.info('\nAttaching membrane voltage hooks...')
     inner_model = model.model if hasattr(model, 'model') else model
     profiler = MembraneVoltageProfiler(inner_model)
 
-    # Storage for results
-    fn_voltages = []          # max sub-threshold voltage at each false-negative location
-    tp_voltages = []          # max sub-threshold voltage at each true-positive location
+    if profiler.hook_count == 0:
+        LOGGER.error('NO IFNode hooks attached! Model structure may be unexpected.')
+        LOGGER.info('Model modules found:')
+        for name, mod in inner_model.named_modules():
+            LOGGER.info(f'  {name}: {type(mod).__name__}')
+        return
+
+    # Storage
+    fn_voltages = []
+    tp_voltages = []
     fn_voltages_by_class = defaultdict(list)
     tp_voltages_by_class = defaultdict(list)
-    fn_box_areas = []         # normalized box area of each FN
+    fn_box_areas = []
     tp_box_areas = []
 
-    iouv = torch.tensor([0.5], device=device)  # single IoU threshold for FN/TP split
+    # Identify which hooked layers have the largest spatial dims (closest to input)
+    # We'll determine this from the first batch
+    best_layers = None  # will be set after first batch
 
-    LOGGER.info(f'Profiling {len(dataloader)} batches...')
+    LOGGER.info(f'Profiling {len(dataloader)} batches...\n')
     reset_net(inner_model)
+    debug_printed = False
 
     for batch_i, (im, targets, paths, shapes) in enumerate(tqdm(dataloader, bar_format=TQDM_BAR_FORMAT)):
         profiler.clear()
@@ -209,44 +232,86 @@ def run_profiling(
         im = im.to(device).float() / 255.0
         nb, _, height, width = im.shape
 
-        # Forward pass (hooks capture voltages)
-        preds = model(im)
-        if isinstance(preds, tuple):
+        # Forward pass — hooks capture voltages
+        with torch.no_grad():
+            preds = model(im)
+
+        # Handle model output format
+        if isinstance(preds, (list, tuple)):
             preds = preds[0]
 
         # NMS
-        targets_px = targets.clone()
-        targets_px[:, 2:] *= torch.tensor((width, height, width, height), device='cpu')
         preds_nms = non_max_suppression(preds, conf_thres, iou_thres, max_det=300)
 
-        # Get captured voltages
+        # Get captured voltages (already on CPU from hook)
         voltages = profiler.get_voltages()
 
-        # Process each image in batch (batch_size=1, so just si=0)
+        # Debug: print info for first batch
+        if not debug_printed:
+            LOGGER.info(f'\n--- DEBUG (batch 0) ---')
+            LOGGER.info(f'  Image shape: {im.shape}')
+            LOGGER.info(f'  Targets shape: {targets.shape}')
+            LOGGER.info(f'  Preds after NMS: {[p.shape for p in preds_nms]}')
+            LOGGER.info(f'  Voltage snapshots per layer:')
+            layer_sizes = {}
+            for lname, vlist in voltages.items():
+                if len(vlist) > 0:
+                    shapes_str = [str(tuple(v.shape)) for v in vlist]
+                    LOGGER.info(f'    {lname}: {len(vlist)} snapshots, shapes={shapes_str}')
+                    # Track spatial size for layer selection
+                    spatial = vlist[0].shape[-2] * vlist[0].shape[-1]
+                    layer_sizes[lname] = spatial
+                else:
+                    LOGGER.info(f'    {lname}: EMPTY (no voltages captured)')
+
+            if not layer_sizes:
+                LOGGER.error('\n  ALL voltage snapshots are EMPTY — hooks did not fire!')
+                LOGGER.error('  This likely means the model architecture does not use IFNode')
+                LOGGER.error('  in the expected way. Aborting.\n')
+                profiler.remove_hooks()
+                return
+
+            # Pick layers with largest spatial dims (best for small objects)
+            sorted_layers = sorted(layer_sizes.items(), key=lambda x: -x[1])
+            # Use top-2 largest spatial layers (likely the FPN outputs before detect)
+            best_layers = [name for name, _ in sorted_layers[:2]]
+            LOGGER.info(f'  Using layers: {best_layers}')
+
+            # Debug target info
+            labels_0 = targets[targets[:, 0] == 0, 1:]
+            LOGGER.info(f'  Labels for image 0: {labels_0.shape}')
+            if labels_0.shape[0] > 0:
+                LOGGER.info(f'    First label: cls={labels_0[0, 0]:.0f}, '
+                           f'xywh={labels_0[0, 1:].tolist()}')
+            LOGGER.info(f'--- END DEBUG ---\n')
+            debug_printed = True
+
+        # Process each image in batch
         for si in range(nb):
-            pred = preds_nms[si]
-            labels = targets[targets[:, 0] == si, 1:].to(device)  # [M, 5]: cls, cx, cy, w, h (normalized)
+            pred = preds_nms[si].cpu()  # [N_pred, 6] on CPU
+            labels = targets[targets[:, 0] == si, 1:]  # [M, 5] cls,cx,cy,w,h (normalized)
 
             if labels.shape[0] == 0:
                 continue
 
-            # Convert GT to pixel xyxy
-            tbox_norm = labels[:, 1:5].clone()  # cx, cy, w, h normalized
-            # Convert to xyxy in pixel coords
-            tbox_px = xywh2xyxy(tbox_norm * torch.tensor([width, height, width, height], device=device))
-
-            gt_classes = labels[:, 0].long()
             n_gt = labels.shape[0]
+            gt_classes = labels[:, 0].long()
 
-            # Compute box areas (normalized by image area for scale analysis)
-            box_areas = ((tbox_px[:, 2] - tbox_px[:, 0]) * (tbox_px[:, 3] - tbox_px[:, 1])) / (width * height)
+            # Convert GT boxes to pixel xyxy
+            tbox_px = xywh2xyxy(
+                labels[:, 1:5] * torch.tensor([width, height, width, height], dtype=torch.float32)
+            )
 
-            # Determine which GT boxes are matched (TP) vs unmatched (FN)
-            matched = torch.zeros(n_gt, dtype=torch.bool, device=device)
+            # Box areas (normalized)
+            box_areas = ((tbox_px[:, 2] - tbox_px[:, 0]) *
+                         (tbox_px[:, 3] - tbox_px[:, 1])) / (width * height)
+
+            # Match GT to predictions (all on CPU)
+            matched = torch.zeros(n_gt, dtype=torch.bool)
 
             if pred.shape[0] > 0:
                 iou = box_iou(tbox_px, pred[:, :4])  # [M_gt, N_pred]
-                correct_class = gt_classes[:, None] == pred[:, 5][None, :]  # [M_gt, N_pred]
+                correct_class = gt_classes[:, None] == pred[:, 5].long()[None, :]
                 valid = (iou >= 0.5) & correct_class
 
                 for gi in range(n_gt):
@@ -256,28 +321,17 @@ def run_profiling(
             fn_mask = ~matched
             tp_mask = matched
 
-            # Extract voltage at GT locations from each hooked layer
-            for layer_name, v_list in voltages.items():
+            # Extract voltage from the best layers
+            collected_for_this_image = False
+            for layer_name in (best_layers or voltages.keys()):
+                v_list = voltages.get(layer_name, [])
                 if len(v_list) == 0:
                     continue
 
                 feat_h, feat_w = v_list[0].shape[-2], v_list[0].shape[-1]
-
-                # Slice voltages for this image in batch
-                v_for_img = []
-                for v_t in v_list:
-                    if v_t.dim() == 4:
-                        v_for_img.append(v_t[si])
-                    else:
-                        v_for_img.append(v_t)
-
-                # Map GT boxes to this feature grid
                 gy, gx = map_boxes_to_feature_grid(tbox_px, (height, width), (feat_h, feat_w))
+                v_max = extract_voltage_at_locations(v_list, gy, gx, si=si)
 
-                # Extract voltages
-                v_max = extract_voltage_at_locations(v_for_img, gy, gx)
-
-                # Store FN voltages
                 for i in range(n_gt):
                     cls_id = gt_classes[i].item()
                     area = box_areas[i].item()
@@ -292,8 +346,8 @@ def run_profiling(
                         tp_voltages_by_class[cls_id].append(v)
                         tp_box_areas.append(area)
 
-                # Only use the best (largest feature map) layer per GT box
-                break
+                collected_for_this_image = True
+                break  # use the first (largest) available layer
 
         reset_net(inner_model)
 
@@ -311,6 +365,13 @@ def run_profiling(
     LOGGER.info(f'  True Positives (matched):    {len(tp_voltages)}')
     LOGGER.info(f'  False Negatives (missed):    {len(fn_voltages)}')
 
+    if len(fn_voltages) == 0 and len(tp_voltages) == 0:
+        LOGGER.error('\n  NO objects were processed. Possible causes:')
+        LOGGER.error('  1. Voltage hooks captured empty data (check DEBUG output above)')
+        LOGGER.error('  2. Dataset labels could not be loaded')
+        LOGGER.error('  3. Prediction/label coordinate mismatch')
+        return
+
     # Threshold-limited analysis
     thresholds = [0.25, 0.5, 0.75, 0.9]
     LOGGER.info(f'\nFalse Negatives by sub-threshold voltage range:')
@@ -319,7 +380,7 @@ def run_profiling(
 
     if len(fn_voltages) > 0:
         for tau in thresholds:
-            count = (fn_v >= tau).sum()
+            count = int((fn_v >= tau).sum())
             frac = count / len(fn_v)
             label = {0.25: 'some signal', 0.5: 'SMRR recoverable',
                      0.75: 'highly recoverable', 0.9: 'almost fired'}[tau]
@@ -337,14 +398,14 @@ def run_profiling(
         cls_name = names.get(cls_id, str(cls_id))
         fn_cls = np.array(fn_voltages_by_class.get(cls_id, [0.0]))
         n_fn = len(fn_voltages_by_class.get(cls_id, []))
-        n_recoverable = (fn_cls >= 0.5).sum() if n_fn > 0 else 0
+        n_recoverable = int((fn_cls >= 0.5).sum()) if n_fn > 0 else 0
         frac = n_recoverable / n_fn if n_fn > 0 else 0
         LOGGER.info(f'  {cls_name:<15} {n_fn:>10d} {n_recoverable:>10d} {frac:>10.1%}')
 
     # SMRR expected impact
     LOGGER.info(f'\n{"=" * 70}')
     if len(fn_voltages) > 0:
-        recoverable_frac = (fn_v >= 0.5).sum() / len(fn_v)
+        recoverable_frac = float((fn_v >= 0.5).sum()) / len(fn_v)
         total_objects = len(fn_voltages) + len(tp_voltages)
         current_recall = len(tp_voltages) / total_objects if total_objects > 0 else 0
         recall_ceiling = current_recall + (1 - current_recall) * recoverable_frac
@@ -385,10 +446,11 @@ def run_profiling(
     if len(fn_voltages) > 0:
         sorted_v = np.sort(fn_v)
         cdf = np.arange(1, len(sorted_v) + 1) / len(sorted_v)
-        ax.plot(sorted_v, cdf, color='red', linewidth=2)
+        ax.plot(sorted_v, cdf, color='red', linewidth=2, label='FN CDF')
         ax.axvline(x=0.5, color='orange', linestyle='--', label='tau=0.5')
-        ax.axhline(y=(fn_v >= 0.5).mean(), color='blue', linestyle=':', alpha=0.5,
-                   label=f'{(fn_v >= 0.5).mean():.0%} above tau')
+        frac_above = float((fn_v >= 0.5).mean())
+        ax.axhline(y=1-frac_above, color='blue', linestyle=':', alpha=0.5,
+                   label=f'{frac_above:.0%} above tau')
     ax.set_xlabel('Max sub-threshold voltage')
     ax.set_ylabel('Cumulative fraction of FN')
     ax.set_title('FN Voltage CDF (above tau = recoverable)')
@@ -396,17 +458,18 @@ def run_profiling(
 
     # Plot 3: Voltage vs box area (scatter)
     ax = axes[1, 0]
-    if len(fn_voltages) > 0:
+    if len(fn_voltages) > 0 and len(fn_box_areas) > 0:
         ax.scatter(fn_box_areas, fn_v[:len(fn_box_areas)], alpha=0.3, s=8,
                    color='red', label='FN')
-    if len(tp_voltages) > 0:
+    if len(tp_voltages) > 0 and len(tp_box_areas) > 0:
         ax.scatter(tp_box_areas, tp_v[:len(tp_box_areas)], alpha=0.3, s=8,
                    color='green', label='TP')
     ax.set_xlabel('Normalized box area')
     ax.set_ylabel('Max sub-threshold voltage')
     ax.set_title('Voltage vs Object Size')
     ax.legend(fontsize=8)
-    ax.set_xscale('log')
+    if len(fn_box_areas) > 0 or len(tp_box_areas) > 0:
+        ax.set_xscale('log')
 
     # Plot 4: Per-class bar chart
     ax = axes[1, 1]
@@ -415,7 +478,7 @@ def run_profiling(
     recov_fracs = []
     for c in cls_ids:
         fn_cls = np.array(fn_voltages_by_class[c])
-        recov_fracs.append((fn_cls >= 0.5).mean() if len(fn_cls) > 0 else 0)
+        recov_fracs.append(float((fn_cls >= 0.5).mean()) if len(fn_cls) > 0 else 0)
     if cls_labels:
         bars = ax.bar(cls_labels, recov_fracs, color='steelblue')
         ax.axhline(y=0.4, color='orange', linestyle='--', label='Strong benefit threshold')
