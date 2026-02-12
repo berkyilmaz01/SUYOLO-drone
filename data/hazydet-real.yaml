@@ -1,0 +1,22 @@
+# HazyDet — Real-World Hazy Drone Images (PDFT Stage 2 target domain)
+# https://github.com/GrokCV/HazyDet
+# 3 classes, COCO annotations converted to YOLO format
+#
+# This config is for PDFT Stage 2: fine-tuning on real-world hazy data.
+# Contains 400 real hazy training images and 200 real hazy test images
+# captured under genuine fog across urban, rural, and littoral regions.
+#
+# Usage: after training on synthetic hazy data (Stage 1), fine-tune with:
+#   python train_pdft.py --weights runs/train/pdft_stage1/weights/best.pt \
+#       --data-real data/hazydet-real.yaml --stage 2
+
+path: ../HazyDet
+train: real_train/images
+val: real_test/images       # real-world test set used for validation
+test: real_test/images
+
+nc: 3
+names:
+  0: car
+  1: truck
+  2: bus

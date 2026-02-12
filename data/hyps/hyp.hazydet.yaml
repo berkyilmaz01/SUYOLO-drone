@@ -1,0 +1,47 @@
+# Hyperparameters tuned for HazyDet drone-view object detection in hazy conditions
+# Based on hyp.visdrone.yaml with haze-specific adjustments informed by
+# "HazyDet: Open-Source Benchmark for Drone-View Object Detection with Depth-Cues in Hazy Scenes"
+#
+# Key differences from visdrone:
+#   - hsv_s: 0.4 (reduced — haze already desaturates; strong saturation jitter can break haze realism)
+#   - hsv_v: 0.6 (increased — haze varies brightness heavily, model must be robust to contrast shifts)
+#   - scale: 0.7 (more aggressive — HazyDet has extreme scale variation, 64–1024 px^2 objects)
+#   - mosaic: 0.7 (moderate — denser than VisDrone but haze context matters; too much mosaic fragments haze gradients)
+#   - mixup: 0.10 (slightly more than visdrone — helps with haze-induced feature shift, but not so much it blurs small objects)
+#   - translate: 0.2 (same as visdrone — objects are scattered non-uniformly in drone scenes)
+#   - flipud: 0.5 (drone perspective benefits from vertical flip)
+#   - copy_paste: 0.0 (HazyDet has bbox-only annotations, no segmentation masks)
+#   - fl_gamma: 1.5 (focal loss — HazyDet is heavily car-dominated, focal loss helps truck/bus recall)
+#   - cls: 1.0 (doubled — class imbalance in HazyDet is severe: car ~85%, truck ~8%, bus ~7%)
+#   - inner_iou_ratio: 0.7 (helps small object bbox regression, majority of HazyDet objects are small)
+
+lr0: 0.01  # initial learning rate (SGD=1E-2, Adam=1E-3)
+lrf: 0.01  # final OneCycleLR learning rate (lr0 * lrf)
+momentum: 0.937  # SGD momentum/Adam beta1
+weight_decay: 0.0005  # optimizer weight decay 5e-4
+warmup_epochs: 3.0  # warmup epochs (fractions ok)
+warmup_momentum: 0.8  # warmup initial momentum
+warmup_bias_lr: 0.1  # warmup initial bias lr
+box: 7.5  # box loss gain
+cls: 1.0  # cls loss gain — doubled for HazyDet class imbalance (car dominates 85%+)
+cls_pw: 1.0  # cls BCELoss positive_weight
+obj: 0.7  # obj loss gain (scale with pixels)
+obj_pw: 1.0  # obj BCELoss positive_weight
+dfl: 1.5  # dfl loss gain
+iou_t: 0.20  # IoU training threshold
+anchor_t: 5.0  # anchor-multiple threshold
+fl_gamma: 1.5  # focal loss gamma — enabled for class imbalance (car/truck/bus ratio ~85/8/7)
+hsv_h: 0.015  # image HSV-Hue augmentation (fraction)
+hsv_s: 0.4  # image HSV-Saturation — reduced, haze already desaturates images
+hsv_v: 0.6  # image HSV-Value — increased, haze causes large brightness/contrast variation
+degrees: 0.0  # image rotation (+/- deg)
+translate: 0.2  # image translation — objects scatter non-uniformly in drone views
+scale: 0.7  # image scale — aggressive for HazyDet's extreme scale variation (64-1024 px^2)
+shear: 0.0  # image shear (+/- deg)
+perspective: 0.0  # image perspective (+/- fraction), range 0-0.001
+flipud: 0.5  # image flip up-down — drone perspective benefits from vertical flip
+fliplr: 0.5  # image flip left-right (probability)
+mosaic: 0.7  # image mosaic — moderate; too much fragments haze gradients across tiles
+mixup: 0.10  # image mixup — helps with haze-induced feature shift
+copy_paste: 0.0  # segment copy-paste — disabled, HazyDet has bbox-only annotations
+inner_iou_ratio: 0.7  # Inner-IoU — most HazyDet objects are small, accelerates bbox regression
