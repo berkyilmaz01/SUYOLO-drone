@@ -4,7 +4,7 @@
 # Uses hazy_images for training (degraded visibility challenge)
 
 path: ../HazyDet
-train: train/images
+train: train/hazy_images
 val: val/images
 test: test/images
 

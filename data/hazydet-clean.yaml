@@ -11,7 +11,7 @@
 #   + RIDCP dehaze: mAP 44.8% (synth hazy test), 24.2% (real hazy test)
 
 path: ../HazyDet
-train: train/clean_images
+train: train/images
 val: val/images          # val is hazy (measures domain gap)
 test: test/images        # test is hazy (measures domain gap)
 
