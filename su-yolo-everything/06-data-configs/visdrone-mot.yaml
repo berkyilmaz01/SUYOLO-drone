@@ -1,0 +1,32 @@
+# VisDrone MOT-only dataset (sampled video frames)
+#
+# Preparation:
+#   1. Convert MOT train (sample every 10th frame):
+#      python scripts/convert_visdrone_mot_to_yolo.py \
+#        --mot-dir ../VisDrone-raw/VisDrone2019-MOT-train \
+#        --output-dir ../VisDrone/MOT-train \
+#        --sample-rate 10
+#
+#   2. Convert MOT val (sample every 5th frame):
+#      python scripts/convert_visdrone_mot_to_yolo.py \
+#        --mot-dir ../VisDrone-raw/VisDrone2019-MOT-val \
+#        --output-dir ../VisDrone/MOT-val \
+#        --sample-rate 5
+
+path: ../VisDrone
+train: MOT-train/images
+val: MOT-val/images
+
+# 10 classes (VisDrone categories 1-10)
+nc: 10
+names:
+  0: pedestrian
+  1: people
+  2: bicycle
+  3: car
+  4: van
+  5: truck
+  6: tricycle
+  7: awning-tricycle
+  8: bus
+  9: motor

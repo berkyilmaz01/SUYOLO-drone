@@ -1,0 +1,65 @@
+# SU-YOLO 720p — optimized for 1280x720 VisDrone on ZCU102
+# Adds P2/8 detection head for small objects (pedestrians, bicycles from altitude)
+
+# parameters
+nc: 10  # number of classes (VisDrone: 10 — overridden by data yaml at runtime)
+depth_multiple: 1.0  # model depth multiple
+width_multiple: 1.0  # layer channel multiple
+
+# anchors
+anchors: 2
+
+# gelan backbone
+backbone:
+  [
+   # conv down
+   [-1, 1, SEncoder, [64, 3, 2]],  # 0-P1/2
+
+   # elan-1 block
+   [-1, 1, BasicBlock1, [128, 128, 64, 1]],  # 1-P2/4
+
+   # elan-2 block
+   [-1, 1, BasicBlock1, [256, 256, 128, 1]],  # 2-P3/8
+
+   # elan-2 block
+   [-1, 1, BasicBlock1, [512, 512, 256, 1]],  # 3-P4/16
+  ]
+
+# gelan head
+head:
+  [
+    # elan-spp block
+   [ -1, 1, TransitionBlock, [ 512, 256 ] ],  # 4
+
+    # up-concat merge to P3
+   [ -1, 1, SUpsample, [ 2 ] ],
+   [ [ -1, 2 ], 1, SConcat, [ 1 ] ],  # cat backbone P3
+
+    # elan-2 block
+   [ -1, 1, BasicBlock2, [ 256, 256, 128, 1 ] ],  # 7 (P3/8-medium)
+
+    # up-concat merge to P2 (small objects)
+   [ -1, 1, SUpsample, [ 2 ] ],
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # cat backbone P2
+
+    # elan-2 block
+   [ -1, 1, BasicBlock2, [ 128, 128, 64, 1 ] ],  # 10 (P2/4-small)
+
+    # down-conv merge back to P3
+   [-1, 1, SConv, [256, 3, 2]],
+   [ [ -1, 7 ], 1, SConcat, [ 1 ] ],  # cat head P3
+
+    # elan-2 block
+   [ -1, 1, BasicBlock2, [ 256, 256, 128, 1 ] ],  # 13 (P3/8-medium)
+
+    # down-conv merge to P4
+   [-1, 1, SConv, [256, 3, 2]],
+   [ [ -1, 4 ], 1, SConcat, [ 1 ] ],  # cat head P4
+
+    # elan-2 block
+   [ -1, 1, BasicBlock2, [ 256, 256, 128, 1 ] ],  # 16 (P4/16-large)
+
+    # detect at P2, P3, P4 — 3 scales for small/medium/large objects
+   [ [ 10, 13, 16 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3, P4)
+
+  ]

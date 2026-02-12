@@ -1,0 +1,22 @@
+# HazyDet — Clean (non-hazy) source images for baseline comparison
+# https://github.com/GrokCV/HazyDet
+# 3 classes, COCO annotations converted to YOLO format
+#
+# Uses clean_images (original undegraded images) for training.
+# Test sets are still hazy to measure domain gap between clean-trained
+# and haze-trained models.
+#
+# Reference baselines (from paper Table 5, trained on clean, tested on hazy):
+#   Faster RCNN:  mAP 39.5% (synth hazy test), 21.5% (real hazy test)
+#   + RIDCP dehaze: mAP 44.8% (synth hazy test), 24.2% (real hazy test)
+
+path: ../HazyDet
+train: train/clean_images
+val: val/images          # val is hazy (measures domain gap)
+test: test/images        # test is hazy (measures domain gap)
+
+nc: 3
+names:
+  0: car
+  1: truck
+  2: bus

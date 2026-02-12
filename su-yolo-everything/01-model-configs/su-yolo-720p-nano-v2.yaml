@@ -1,0 +1,70 @@
+# SU-YOLO 720p Nano V2 — accuracy-optimized, still fits ZCU102 budget
+#
+# Changes from Nano V1:
+#   - Wider backbone: 24→48→96 channels (was 16→32→64)
+#   - Wider neck/head: 48ch output (was 32ch)
+#   - Same 2-scale P2+P3 design (optimal for VisDrone small objects)
+#   - Same reg_max: 8 and time_step: 1
+#
+# GOPS estimate at 1280x736, time_step=1:
+#   SEncoderLite (3→24):  0.96 GOPS  (stem)
+#   BasicBlock1 (24→48):  0.97 GOPS  (P2/4)
+#   BasicBlock1 (48→96):  0.97 GOPS  (P3/8)
+#   Head (FPN + BB2):     1.00 GOPS  (neck)
+#   SDDetect (P2+P3):     3.10 GOPS  (heads, c3=48 wider cls branch)
+#   TOTAL:               ~7.0 GOPS
+#
+# ZCU102 budget check (single B4096 core @ 281MHz, ~55% util):
+#   Available: 8.6-10.3 GOPS → latency ~11ms ✓ (under 15ms)
+#   3-core pipeline throughput: ~90 FPS ✓ (above 60 FPS)
+#
+# Train: python train.py --cfg models/detect/su-yolo-720p-nano-v2.yaml \
+#          --data data/visdrone.yaml --hyp data/hyps/hyp.visdrone.yaml \
+#          --img 736 --batch 16 --time-step 1 --epochs 200 --cos-lr
+# Export: python export.py --weights best.pt --imgsz 736 1280 --include vitisai
+
+# parameters
+nc: 10  # VisDrone classes (overridden by data yaml at runtime)
+depth_multiple: 1.0
+width_multiple: 1.0  # explicit channels below — do NOT scale
+reg_max: 8  # lighter bbox regression (default 16)
+
+# anchors
+anchors: 2
+
+# backbone — 2-stage (P2+P3), no P4. Wider channels for better features.
+backbone:
+  [
+   # SEncoderLite: stride-2 first → halves spatial dims cheaply (Cin=3)
+   [-1, 1, SEncoderLite, [24, 3, 2]],  # 0-P1/2  24ch, 640x368
+
+   # elan-1 block: 24→48ch, stride 2
+   [-1, 1, BasicBlock1, [48, 48, 24, 1]],  # 1-P2/4  48ch, 320x184
+
+   # elan-1 block: 48→96ch, stride 2
+   [-1, 1, BasicBlock1, [96, 96, 48, 1]],  # 2-P3/8  96ch, 160x92
+  ]
+
+# head — P2/P3 two-scale FPN + detect
+head:
+  [
+    # 1x1 channel reduce on P3
+   [ -1, 1, SConv, [ 48, 1, 1 ] ],  # 3 — 96→48ch @ 160x92
+
+    # upsample + concat with backbone P2
+   [ -1, 1, SUpsample, [ 2 ] ],  # 4 — 48ch @ 320x184
+   [ [ -1, 1 ], 1, SConcat, [ 1 ] ],  # 5 — cat → 96ch @ 320x184
+
+    # elan-2 block for P2 output
+   [ -1, 1, BasicBlock2, [ 48, 48, 24, 1 ] ],  # 6 (P2/4-small) 48ch
+
+    # downsample + concat with head P3
+   [-1, 1, SConv, [48, 3, 2]],  # 7 — 48ch @ 160x92
+   [ [ -1, 3 ], 1, SConcat, [ 1 ] ],  # 8 — cat → 96ch @ 160x92
+
+    # elan-2 block for P3 output
+   [ -1, 1, BasicBlock2, [ 48, 48, 24, 1 ] ],  # 9 (P3/8-medium) 48ch
+
+    # detect at P2 + P3 (2 scales)
+   [ [ 6, 9 ], 1, SDDetect, [ nc ] ],  # SDDetect(P2, P3)
+  ]

@@ -1,0 +1,15 @@
+# HazyDet — Drone-View Object Detection in Hazy Scenes
+# https://github.com/GrokCV/HazyDet
+# 3 classes, COCO annotations converted to YOLO format
+# Uses hazy_images for training (degraded visibility challenge)
+
+path: ../HazyDet
+train: train/images
+val: val/images
+test: test/images
+
+nc: 3
+names:
+  0: car
+  1: truck
+  2: bus
