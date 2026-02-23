@@ -912,6 +912,78 @@ class LoadImagesAndLabels(Dataset):
         return torch.stack(im4, 0), torch.cat(label4, 0), path4, shapes4
 
 
+class LoadImagesLabelsAndTeacher(LoadImagesAndLabels):
+    """Extends LoadImagesAndLabels to also load pre-generated teacher outputs.
+
+    For each image, loads the corresponding teacher .pt file containing
+    neck features and detection logits saved by generate_teacher_outputs.py.
+    """
+
+    def __init__(self, *args, teacher_dir=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.teacher_dir = Path(teacher_dir) if teacher_dir else None
+        if self.teacher_dir:
+            n_found = sum(1 for f in self.im_files
+                          if (self.teacher_dir / f'{Path(f).stem}.pt').exists())
+            LOGGER.info(f'Teacher outputs: {n_found}/{len(self.im_files)} files found in {self.teacher_dir}')
+
+    def __getitem__(self, index):
+        img, labels, path, shapes = super().__getitem__(index)
+
+        teacher_data = {}
+        if self.teacher_dir is not None:
+            stem = Path(path).stem
+            teacher_path = self.teacher_dir / f'{stem}.pt'
+            if teacher_path.exists():
+                teacher_data = torch.load(teacher_path, map_location='cpu', weights_only=False)
+
+        return img, labels, path, shapes, teacher_data
+
+    @staticmethod
+    def collate_fn(batch):
+        im, label, path, shapes, teacher = zip(*batch)
+        for i, lb in enumerate(label):
+            lb[:, 0] = i
+        return torch.stack(im, 0), torch.cat(label, 0), path, shapes, teacher
+
+
+def create_kd_dataloader(path, imgsz, batch_size, stride, single_cls=False,
+                         hyp=None, augment=False, cache=False, pad=0.0,
+                         rect=False, rank=-1, workers=8, image_weights=False,
+                         close_mosaic=False, quad=False, min_items=0, prefix='',
+                         shuffle=False, teacher_dir=None):
+    """Create dataloader that loads teacher outputs alongside images and labels."""
+    if rect and shuffle:
+        LOGGER.warning('WARNING: --rect is incompatible with DataLoader shuffle, setting shuffle=False')
+        shuffle = False
+    with torch_distributed_zero_first(rank):
+        dataset = LoadImagesLabelsAndTeacher(
+            path, imgsz, batch_size,
+            augment=augment, hyp=hyp, rect=rect,
+            cache_images=cache, single_cls=single_cls,
+            stride=int(stride), pad=pad,
+            image_weights=image_weights,
+            min_items=min_items, prefix=prefix,
+            teacher_dir=teacher_dir)
+
+    batch_size = min(batch_size, len(dataset))
+    nd = torch.cuda.device_count()
+    nw = min([os.cpu_count() // max(nd, 1), batch_size if batch_size > 1 else 0, workers])
+    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    loader = DataLoader if image_weights or close_mosaic else InfiniteDataLoader
+    generator = torch.Generator()
+    generator.manual_seed(6148914691236517205 + RANK)
+    return loader(dataset,
+                  batch_size=batch_size,
+                  shuffle=shuffle and sampler is None,
+                  num_workers=nw,
+                  sampler=sampler,
+                  pin_memory=PIN_MEMORY,
+                  collate_fn=LoadImagesLabelsAndTeacher.collate_fn,
+                  worker_init_fn=seed_worker,
+                  generator=generator), dataset
+
+
 # Ancillary functions --------------------------------------------------------------------------------------------------
 def flatten_recursive(path=DATASETS_DIR / 'coco128'):
     # Flatten a recursive directory by bringing all files to top level

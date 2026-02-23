@@ -215,3 +215,112 @@ class ComputeLoss:
         loss[2] *= 1.5  # dfl gain
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+
+
+class DistillationLoss(nn.Module):
+    """Knowledge distillation loss for offline teacher-student training.
+
+    Combines:
+      - Logit KD: KL divergence on classification logits with temperature scaling
+        (Hinton et al. 2015, "Distilling the Knowledge in a Neural Network")
+      - Feature KD: MSE between adapter-projected student features and teacher features
+        at spatially aligned scales (P3/8 and P4/16)
+
+    The adapter layers (1x1 convs) project student channels to match teacher channels
+    so MSE can be computed. These adapters are learnable and included in the optimizer.
+    """
+
+    def __init__(self, student_channels, teacher_channels, temperature=4.0, device='cpu'):
+        """
+        Args:
+            student_channels: list of student neck output channels at aligned scales
+                              e.g. [64, 64] for mid-ghost P3 and P4
+            teacher_channels: list of teacher neck output channels at aligned scales
+                              e.g. [256, 512] for GELAN-C P3 and P4
+            temperature: softening temperature for logit KD (higher = softer)
+            device: torch device
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.num_feat_scales = len(student_channels)
+
+        # 1x1 conv adapters to project student features to teacher feature space
+        self.adapters = nn.ModuleList()
+        for s_ch, t_ch in zip(student_channels, teacher_channels):
+            self.adapters.append(nn.Conv2d(s_ch, t_ch, 1, bias=False))
+
+        self.to(device)
+
+    def logit_kd_loss(self, student_logits, teacher_logits):
+        """KL divergence loss on classification logits with temperature scaling.
+
+        Both inputs are raw logits (before sigmoid). We apply temperature-scaled
+        softmax to convert to distributions, then compute KL divergence.
+
+        Args:
+            student_logits: (B, C, N) student cls logits concatenated across scales
+            teacher_logits: (B, C, N) teacher cls logits concatenated across scales
+                            (may have different N if detection scales differ)
+        """
+        T = self.temperature
+
+        # For detection, cls logits are per-class binary (sigmoid, not softmax).
+        # Use binary KL: compare sigmoid(s/T) vs sigmoid(t/T) via BCE.
+        student_soft = (student_logits / T).float()
+        teacher_soft = (teacher_logits / T).float().detach()
+        teacher_prob = torch.sigmoid(teacher_soft)
+
+        loss = F.binary_cross_entropy_with_logits(
+            student_soft, teacher_prob, reduction='mean') * (T * T)
+
+        return loss
+
+    def feature_kd_loss(self, student_feats, teacher_feats):
+        """MSE loss between adapter-projected student features and teacher features.
+
+        Args:
+            student_feats: list of student feature tensors at aligned scales
+            teacher_feats: list of teacher feature tensors at aligned scales
+        """
+        loss = torch.tensor(0.0, device=student_feats[0].device)
+        n_scales = min(len(student_feats), len(teacher_feats), self.num_feat_scales)
+
+        for i in range(n_scales):
+            s_feat = student_feats[i]
+            t_feat = teacher_feats[i].to(s_feat.device).detach()
+
+            adapted = self.adapters[i](s_feat.float())
+
+            if adapted.shape[2:] != t_feat.shape[2:]:
+                adapted = F.interpolate(adapted, size=t_feat.shape[2:],
+                                        mode='bilinear', align_corners=False)
+
+            loss = loss + F.mse_loss(adapted, t_feat.float())
+
+        return loss / max(n_scales, 1)
+
+    def forward(self, student_cls_logits, teacher_cls_logits,
+                student_feats, teacher_feats, alpha=1.0, beta=0.5):
+        """
+        Args:
+            student_cls_logits: student classification logits (B, nc, total_anchors)
+            teacher_cls_logits: teacher classification logits, or None to skip
+            student_feats: list of student neck feature maps at aligned scales
+            teacher_feats: list of teacher neck feature maps at aligned scales, or None
+            alpha: weight for logit KD loss
+            beta: weight for feature KD loss
+
+        Returns:
+            kd_loss: scalar distillation loss
+            kd_items: detached tensor [logit_kd, feat_kd] for logging
+        """
+        kd_items = torch.zeros(2, device=student_cls_logits.device)
+
+        if teacher_cls_logits is not None and alpha > 0:
+            kd_items[0] = self.logit_kd_loss(student_cls_logits, teacher_cls_logits)
+
+        if teacher_feats is not None and beta > 0 and student_feats is not None:
+            kd_items[1] = self.feature_kd_loss(student_feats, teacher_feats)
+
+        kd_loss = alpha * kd_items[0] + beta * kd_items[1]
+        return kd_loss, kd_items.detach()
