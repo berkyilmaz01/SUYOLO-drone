@@ -283,6 +283,9 @@ def train(hyp, opt, device, callbacks):
     if pretrained:
         if resume:
             best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, ema, weights, epochs, resume)
+            if distill_loss is not None and 'distill_loss' in ckpt:
+                distill_loss.load_state_dict(ckpt['distill_loss'])
+                LOGGER.info("Restored distillation adapter weights from checkpoint")
         del ckpt, csd
 
     # DP mode
@@ -385,7 +388,9 @@ def train(hyp, opt, device, callbacks):
             LOGGER.info("Closing dataloader mosaic")
             dataset.mosaic = False
 
-        # Feature KD only when mosaic is off (spatial alignment required)
+        # KD only when mosaic is off: teacher outputs are per-image, but
+        # mosaic composites 4 images, making teacher logits/features invalid
+        use_logit_kd = not dataset.mosaic and kd_alpha > 0 and distill_loss is not None
         use_feat_kd = not dataset.mosaic and kd_beta > 0 and distill_loss is not None
 
         mloss = torch.zeros(3, device=device)
@@ -457,7 +462,7 @@ def train(hyp, opt, device, callbacks):
                         # Check if any teacher data was loaded for this batch
                         has_teacher = any(len(td) > 0 for td in teacher_data)
 
-                        if has_teacher and kd_alpha > 0:
+                        if has_teacher and use_logit_kd:
                             # Verify all batch items have teacher logits
                             all_have_logits = all(
                                 td and 'det_logits_0' in td for td in teacher_data)
@@ -625,6 +630,8 @@ def train(hyp, opt, device, callbacks):
                     'opt': vars(opt),
                     'git': GIT_INFO,
                     'date': datetime.now().isoformat()}
+                if distill_loss is not None:
+                    ckpt['distill_loss'] = distill_loss.state_dict()
 
                 torch.save(ckpt, last)
                 if best_fitness == fi:

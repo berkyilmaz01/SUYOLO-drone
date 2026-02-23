@@ -1,9 +1,9 @@
 """Generate teacher soft labels and feature maps for offline knowledge distillation.
 
 Runs a trained GELAN-C teacher model on the training set and saves per-image:
-  - P3/8 neck features (before detection head)
-  - P4/16 neck features (before detection head)
-  - Raw detection logits (cls + bbox, before sigmoid/softmax)
+  - P3/8, P4/16, P5/32 neck features (before detection head)
+  - Raw detection logits per scale (cls + bbox, before sigmoid/softmax)
+  - Teacher metadata (reg_max, nc, feature_layers)
 
 Usage:
     python generate_teacher_outputs.py \
