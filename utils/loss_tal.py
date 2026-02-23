@@ -311,16 +311,20 @@ class DistillationLoss(nn.Module):
             beta: weight for feature KD loss
 
         Returns:
-            kd_loss: scalar distillation loss
+            kd_loss: scalar distillation loss (carries gradients)
             kd_items: detached tensor [logit_kd, feat_kd] for logging
         """
-        kd_items = torch.zeros(2, device=student_cls_logits.device)
+        # Use separate variables to preserve the computation graph;
+        # in-place assignment to a torch.zeros tensor severs gradients.
+        logit_loss = torch.tensor(0.0, device=student_cls_logits.device)
+        feat_loss = torch.tensor(0.0, device=student_cls_logits.device)
 
         if teacher_cls_logits is not None and alpha > 0:
-            kd_items[0] = self.logit_kd_loss(student_cls_logits, teacher_cls_logits)
+            logit_loss = self.logit_kd_loss(student_cls_logits, teacher_cls_logits)
 
         if teacher_feats is not None and beta > 0 and student_feats is not None:
-            kd_items[1] = self.feature_kd_loss(student_feats, teacher_feats)
+            feat_loss = self.feature_kd_loss(student_feats, teacher_feats)
 
-        kd_loss = alpha * kd_items[0] + beta * kd_items[1]
-        return kd_loss, kd_items.detach()
+        kd_loss = alpha * logit_loss + beta * feat_loss
+        kd_items = torch.stack([logit_loss.detach(), feat_loss.detach()])
+        return kd_loss, kd_items

@@ -85,6 +85,8 @@ def test_teacher_output_format():
         'det_logits_1': torch.randn(67, 68, 120).half(),
         'det_logits_2': torch.randn(67, 34, 60).half(),
         'num_det_scales': 3,
+        'teacher_reg_max': 16,
+        'teacher_nc': 3,
     }
     tmp = os.path.join(tempfile.gettempdir(), 'test_teacher.pt')
     torch.save(teacher_output, tmp)
@@ -98,11 +100,17 @@ def test_teacher_output_format():
             print(f'  {k}: {v}')
     os.remove(tmp)
 
+    # Verify metadata fields saved by generate_teacher_outputs.py
+    assert loaded['teacher_reg_max'] == 16, f"Expected reg_max=16, got {loaded['teacher_reg_max']}"
+    assert loaded['teacher_nc'] == 3, f"Expected nc=3, got {loaded['teacher_nc']}"
+    print(f'  teacher_reg_max: {loaded["teacher_reg_max"]}, teacher_nc: {loaded["teacher_nc"]}')
+
     # Verify teacher cls logit extraction (reg_max=16, nc=3 -> 64+3=67)
     logit = loaded['det_logits_0']
-    t_reg_max = 16
+    t_reg_max = loaded['teacher_reg_max']
     t_cls = logit[t_reg_max * 4:, :, :]
-    assert t_cls.shape[0] == 3, f'Expected nc=3, got {t_cls.shape[0]}'
+    assert t_cls.shape[0] == loaded['teacher_nc'], \
+        f'Expected nc={loaded["teacher_nc"]}, got {t_cls.shape[0]}'
     print(f'  Teacher cls logit extraction: {t_cls.shape}')
     print('  PASSED')
 
