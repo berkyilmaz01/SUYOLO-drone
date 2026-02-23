@@ -264,14 +264,13 @@ class DistillationLoss(nn.Module):
         """
         T = self.temperature
 
-        # For detection, cls logits are per-class binary (sigmoid, not softmax).
-        # Use binary KL: compare sigmoid(s/T) vs sigmoid(t/T) via BCE.
-        student_soft = (student_logits / T).float()
-        teacher_soft = (teacher_logits / T).float().detach()
-        teacher_prob = torch.sigmoid(teacher_soft)
+        with torch.cuda.amp.autocast(enabled=False):
+            student_soft = student_logits.float() / T
+            teacher_soft = teacher_logits.float().detach() / T
+            teacher_prob = torch.sigmoid(teacher_soft)
 
-        loss = F.binary_cross_entropy_with_logits(
-            student_soft, teacher_prob, reduction='mean') * (T * T)
+            loss = F.binary_cross_entropy_with_logits(
+                student_soft, teacher_prob, reduction='mean') * (T * T)
 
         return loss
 
@@ -289,13 +288,14 @@ class DistillationLoss(nn.Module):
             s_feat = student_feats[i]
             t_feat = teacher_feats[i].to(s_feat.device).detach()
 
-            adapted = self.adapters[i](s_feat.float())
+            with torch.cuda.amp.autocast(enabled=False):
+                adapted = self.adapters[i](s_feat.float())
 
-            if adapted.shape[2:] != t_feat.shape[2:]:
-                adapted = F.interpolate(adapted, size=t_feat.shape[2:],
-                                        mode='bilinear', align_corners=False)
+                if adapted.shape[2:] != t_feat.shape[2:]:
+                    adapted = F.interpolate(adapted, size=t_feat.shape[2:],
+                                            mode='bilinear', align_corners=False)
 
-            loss = loss + F.mse_loss(adapted, t_feat.float())
+                loss = loss + F.mse_loss(adapted, t_feat.float())
 
         return loss / max(n_scales, 1)
 

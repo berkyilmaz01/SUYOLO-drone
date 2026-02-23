@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import time
+import traceback
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -376,6 +377,8 @@ def train(hyp, opt, device, callbacks):
     t_reg_max = getattr(opt, '_kd_teacher_reg_max', 16)
     hook_layers = [student_from[si] for si in matched_s_indices] if matched_s_indices else []
 
+    torch.use_deterministic_algorithms(False)
+
     for epoch in range(start_epoch, epochs):
         callbacks.run('on_train_epoch_start')
         model.train()
@@ -384,8 +387,9 @@ def train(hyp, opt, device, callbacks):
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc
             iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)
             dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)
-        if epoch == (epochs - opt.close_mosaic):
-            LOGGER.info("Closing dataloader mosaic")
+        if epoch >= (epochs - opt.close_mosaic):
+            if dataset.mosaic:
+                LOGGER.info("Closing dataloader mosaic")
             dataset.mosaic = False
 
         # KD only when mosaic is off: teacher outputs are per-image, but
@@ -395,6 +399,9 @@ def train(hyp, opt, device, callbacks):
 
         mloss = torch.zeros(3, device=device)
         mkd = torch.zeros(2, device=device)  # mean KD losses [logit, feat]
+        kd_logit_fail_count = 0
+        kd_feat_fail_count = 0
+        KD_FAIL_THRESHOLD = 10
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
@@ -438,7 +445,7 @@ def train(hyp, opt, device, callbacks):
                         for layer_idx in hook_layers:
                             def make_hook(idx):
                                 def hook_fn(module, input, output):
-                                    if isinstance(output, list):
+                                    if isinstance(output, (list, tuple)):
                                         student_features[idx] = output[0]
                                     else:
                                         student_features[idx] = output
@@ -451,7 +458,6 @@ def train(hyp, opt, device, callbacks):
                     for h in hooks:
                         h.remove()
 
-                    torch.use_deterministic_algorithms(False)
                     loss, loss_items = compute_loss(pred, targets.to(device))
 
                     # --- Knowledge Distillation Loss ---
@@ -517,7 +523,12 @@ def train(hyp, opt, device, callbacks):
                                         kd_items[0] = (per_scale_logit_loss / n_matched).detach()
 
                                 except Exception as e:
-                                    LOGGER.warning(f"KD logit loss failed: {e}")
+                                    kd_logit_fail_count += 1
+                                    LOGGER.warning(f"KD logit loss failed ({kd_logit_fail_count}x): {e}\n{traceback.format_exc()}")
+                                    if kd_logit_fail_count >= KD_FAIL_THRESHOLD:
+                                        raise RuntimeError(
+                                            f"KD logit loss failed {KD_FAIL_THRESHOLD} times in epoch {epoch}. "
+                                            f"Last error: {e}") from e
 
                         # Feature KD (only when mosaic is off — spatial alignment required)
                         if use_feat_kd and has_teacher and student_features:
@@ -547,7 +558,12 @@ def train(hyp, opt, device, callbacks):
                                     kd_loss_val = kd_loss_val + kd_beta * feat_loss
                                     kd_items[1] = feat_loss.detach()
                             except Exception as e:
-                                LOGGER.warning(f"KD feature loss failed: {e}")
+                                kd_feat_fail_count += 1
+                                LOGGER.warning(f"KD feature loss failed ({kd_feat_fail_count}x): {e}\n{traceback.format_exc()}")
+                                if kd_feat_fail_count >= KD_FAIL_THRESHOLD:
+                                    raise RuntimeError(
+                                        f"KD feature loss failed {KD_FAIL_THRESHOLD} times in epoch {epoch}. "
+                                        f"Last error: {e}") from e
 
                     loss = loss + kd_loss_val * batch_size
 
@@ -722,7 +738,7 @@ def parse_opt(known=False):
     parser.add_argument('--seed', type=int, default=0, help='Global training seed')
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
-    parser.add_argument('--close-mosaic', type=int, default=15, help='Experimental')
+    parser.add_argument('--close-mosaic', type=int, default=100, help='Epoch count before end to disable mosaic (KD needs mosaic off; higher = more KD epochs)')
 
     # KD-specific arguments
     parser.add_argument('--teacher-outputs', type=str, default=None, help='path to teacher output .pt files directory')
