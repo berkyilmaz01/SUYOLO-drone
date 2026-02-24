@@ -623,7 +623,7 @@ def train(hyp, opt, device, callbacks):
             reset_net(model)
 
         # Scheduler
-        lr = [x['lr'] for x in optimizer.param_groups]
+        lr = [x['lr'] for x in optimizer.param_groups[:3]]
         scheduler.step()
 
         if RANK in {-1, 0}:
