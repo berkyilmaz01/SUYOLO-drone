@@ -648,7 +648,8 @@ def train(hyp, opt, device, callbacks):
             stop = stopper(epoch=epoch, fitness=fi)
             if fi > best_fitness:
                 best_fitness = fi
-            log_vals = list(mloss) + list(mkd) + list(results) + lr
+            log_vals = [x.item() if hasattr(x, 'item') else x for x in
+                        list(mloss) + list(mkd) + list(results) + lr]
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             if (not nosave) or (final_epoch and not evolve):
@@ -706,7 +707,9 @@ def train(hyp, opt, device, callbacks):
                         callbacks=callbacks,
                         compute_loss=compute_loss)
                     if is_coco:
-                        callbacks.run('on_fit_epoch_end', list(mloss) + list(mkd) + list(results) + lr, epoch, best_fitness, fi)
+                        coco_vals = [x.item() if hasattr(x, 'item') else x for x in
+                                     list(mloss) + list(mkd) + list(results) + lr]
+                        callbacks.run('on_fit_epoch_end', coco_vals, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
 
