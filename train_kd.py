@@ -116,6 +116,22 @@ def train(hyp, opt, device, callbacks):
     data_dict = None
     if RANK in {-1, 0}:
         loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)
+        loggers.keys = [
+            'train/box_loss',
+            'train/cls_loss',
+            'train/dfl_loss',
+            'train/kd_logit_loss',
+            'train/kd_feat_loss',
+            'metrics/precision',
+            'metrics/recall',
+            'metrics/mAP_0.5',
+            'metrics/mAP_0.5:0.95',
+            'val/box_loss',
+            'val/cls_loss',
+            'val/dfl_loss',
+            'x/lr0',
+            'x/lr1',
+            'x/lr2']
         for k in methods(loggers):
             callbacks.register_action(k, callback=getattr(loggers, k))
         data_dict = loggers.remote_dataset
@@ -632,7 +648,7 @@ def train(hyp, opt, device, callbacks):
             stop = stopper(epoch=epoch, fitness=fi)
             if fi > best_fitness:
                 best_fitness = fi
-            log_vals = list(mloss) + list(results) + lr
+            log_vals = list(mloss) + list(mkd) + list(results) + lr
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             if (not nosave) or (final_epoch and not evolve):
@@ -690,7 +706,7 @@ def train(hyp, opt, device, callbacks):
                         callbacks=callbacks,
                         compute_loss=compute_loss)
                     if is_coco:
-                        callbacks.run('on_fit_epoch_end', list(mloss) + list(results) + lr, epoch, best_fitness, fi)
+                        callbacks.run('on_fit_epoch_end', list(mloss) + list(mkd) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
 
