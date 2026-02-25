@@ -104,6 +104,9 @@ def train(hyp, opt, device, callbacks):
     if isinstance(hyp, str):
         with open(hyp, errors='ignore') as f:
             hyp = yaml.safe_load(f)
+    # Override lr0 from command line if provided (useful for fine-tuning)
+    if opt.lr0 is not None:
+        hyp['lr0'] = opt.lr0
     LOGGER.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     hyp['anchor_t'] = 5.0
     opt.hyp = hyp.copy()
@@ -160,11 +163,20 @@ def train(hyp, opt, device, callbacks):
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors'), imgsz=opt.imgsz).to(device)
         model2 = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors'), imgsz=opt.imgsz).to(device)
         exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []
-        csd = ckpt['model'].float().state_dict()
-        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)
+        # Prefer EMA weights — they're always better than training model weights
+        ckpt_model = (ckpt.get('ema') or ckpt['model']).float()
+        csd = ckpt_model.state_dict()
+        model_sd = model.state_dict()
+        csd = intersect_dicts(csd, model_sd, exclude=exclude)
         model.load_state_dict(csd, strict=False)
         model2.load_state_dict(csd, strict=False)
-        LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')
+        n_transferred, n_total = len(csd), len(model_sd)
+        LOGGER.info(f'Transferred {n_transferred}/{n_total} items from {weights}')
+        if n_transferred < n_total * 0.5:
+            LOGGER.warning(f'Only {n_transferred}/{n_total} weights matched — '
+                           f'checkpoint may use a different model architecture than --cfg')
+            skipped = [k for k in model_sd if k not in csd]
+            LOGGER.warning(f'Sample skipped keys: {skipped[:5]}')
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors'), imgsz=opt.imgsz).to(device)
         model2 = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors'), imgsz=opt.imgsz).to(device)
@@ -768,6 +780,7 @@ def parse_opt(known=False):
     parser.add_argument('--kd-alpha', type=float, default=1.0, help='logit KD loss weight')
     parser.add_argument('--kd-beta', type=float, default=0.5, help='feature KD loss weight')
     parser.add_argument('--kd-temperature', type=float, default=4.0, help='KD temperature for logit softening')
+    parser.add_argument('--lr0', type=float, default=None, help='override initial learning rate (lower for fine-tuning, e.g. 0.001)')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')

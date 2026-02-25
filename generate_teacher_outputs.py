@@ -110,7 +110,7 @@ def run(weights, data, imgsz, device, output_dir, batch_size=1, workers=4):
     dataloader, dataset = create_dataloader(
         train_path, imgsz, batch_size, gs,
         single_cls=False, hyp=None, augment=False,
-        cache=False, rect=True, rank=-1,
+        cache=False, rect=False, rank=-1,
         workers=workers, image_weights=False,
         close_mosaic=False, quad=False,
         prefix=colorstr('teacher: '))

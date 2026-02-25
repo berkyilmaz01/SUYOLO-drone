@@ -254,13 +254,13 @@ class DistillationLoss(nn.Module):
     def logit_kd_loss(self, student_logits, teacher_logits):
         """KL divergence loss on classification logits with temperature scaling.
 
-        Both inputs are raw logits (before sigmoid). We apply temperature-scaled
-        softmax to convert to distributions, then compute KL divergence.
+        Both inputs are raw logits (before sigmoid). We compute the difference
+        between the cross-entropy and the teacher's own entropy, so the loss
+        is 0 when the student perfectly matches the teacher (proper KL).
 
         Args:
-            student_logits: (B, C, N) student cls logits concatenated across scales
-            teacher_logits: (B, C, N) teacher cls logits concatenated across scales
-                            (may have different N if detection scales differ)
+            student_logits: (B, C, N) student cls logits
+            teacher_logits: (B, C, N) teacher cls logits
         """
         T = self.temperature
 
@@ -269,8 +269,18 @@ class DistillationLoss(nn.Module):
             teacher_soft = teacher_logits.float().detach() / T
             teacher_prob = torch.sigmoid(teacher_soft)
 
-            loss = F.binary_cross_entropy_with_logits(
-                student_soft, teacher_prob, reduction='mean') * (T * T)
+            # BCE(student, teacher_prob): H(teacher) + KL(teacher || student)
+            bce = F.binary_cross_entropy_with_logits(
+                student_soft, teacher_prob, reduction='mean')
+
+            # Subtract teacher's own entropy so loss = 0 at perfect match
+            eps = 1e-7
+            teacher_entropy = F.binary_cross_entropy(
+                teacher_prob.clamp(eps, 1 - eps),
+                teacher_prob.clamp(eps, 1 - eps),
+                reduction='mean')
+
+            loss = (bce - teacher_entropy) * (T * T)
 
         return loss
 
