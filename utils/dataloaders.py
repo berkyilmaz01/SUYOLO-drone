@@ -935,7 +935,10 @@ class LoadImagesLabelsAndTeacher(LoadImagesAndLabels):
             stem = Path(path).stem
             teacher_path = self.teacher_dir / f'{stem}.pt'
             if teacher_path.exists():
-                teacher_data = torch.load(teacher_path, map_location='cpu', weights_only=False)
+                try:
+                    teacher_data = torch.load(teacher_path, map_location='cpu', weights_only=False)
+                except Exception:
+                    teacher_data = {}
 
         return img, labels, path, shapes, teacher_data
 
