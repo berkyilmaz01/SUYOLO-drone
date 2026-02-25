@@ -41,6 +41,7 @@ except Exception as e:
     raise
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
@@ -512,11 +513,17 @@ def train(hyp, opt, device, callbacks):
                                         t_cls_batch = []
                                         t_valid = True
                                         t_bbox_channels = t_reg_max * 4
+                                        s_H, s_W = s_scale.shape[2], s_scale.shape[3]
                                         for td in teacher_data:
                                             if td and t_logit_key in td:
-                                                t_logit = td[t_logit_key].to(device)  # (no, H, W)
-                                                t_cls_single = t_logit[t_bbox_channels:, :, :].view(student_nc, -1)  # (nc, H*W)
-                                                t_cls_batch.append(t_cls_single)
+                                                t_logit = td[t_logit_key].to(device)  # (no, H_t, W_t)
+                                                t_cls_2d = t_logit[t_bbox_channels:, :, :]  # (nc, H_t, W_t)
+                                                if t_cls_2d.shape[1] != s_H or t_cls_2d.shape[2] != s_W:
+                                                    t_cls_2d = F.interpolate(
+                                                        t_cls_2d.unsqueeze(0).float(),
+                                                        size=(s_H, s_W), mode='bilinear',
+                                                        align_corners=False).squeeze(0)
+                                                t_cls_batch.append(t_cls_2d.reshape(student_nc, -1))
                                             else:
                                                 t_valid = False
                                                 break
@@ -526,11 +533,8 @@ def train(hyp, opt, device, callbacks):
 
                                         t_cls_scale = torch.stack(t_cls_batch, dim=0)  # (B, nc, H*W)
 
-                                        # Spatial dims must match (same stride → same H×W)
-                                        min_hw = min(s_cls_scale.shape[2], t_cls_scale.shape[2])
                                         scale_loss = distill_loss.logit_kd_loss(
-                                            s_cls_scale[:, :, :min_hw],
-                                            t_cls_scale[:, :, :min_hw])
+                                            s_cls_scale, t_cls_scale)
                                         per_scale_logit_loss = per_scale_logit_loss + scale_loss
                                         n_matched += 1
 
