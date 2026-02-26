@@ -389,7 +389,7 @@ def train(hyp, opt, device, callbacks):
     maps = np.zeros(nc)
     results = (0, 0, 0, 0, 0, 0, 0)
     scheduler.last_epoch = start_epoch - 1
-    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(model)
     callbacks.run('on_train_start')
@@ -466,7 +466,7 @@ def train(hyp, opt, device, callbacks):
 
             # Forward with feature hooks for KD
             try:
-                with torch.cuda.amp.autocast(amp):
+                with torch.amp.autocast('cuda', enabled=amp):
                     # Set up hooks to capture student neck features
                     student_features = {}
                     hooks = []

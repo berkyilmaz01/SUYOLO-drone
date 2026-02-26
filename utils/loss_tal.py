@@ -23,7 +23,7 @@ class VarifocalLoss(nn.Module):
 
     def forward(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
         weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             loss = (F.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(),
                                                        reduction="none") * weight).sum()
         return loss
@@ -264,7 +264,7 @@ class DistillationLoss(nn.Module):
         """
         T = self.temperature
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             student_soft = student_logits.float() / T
             teacher_soft = teacher_logits.float().detach() / T
             teacher_prob = torch.sigmoid(teacher_soft)
@@ -298,7 +298,7 @@ class DistillationLoss(nn.Module):
             s_feat = student_feats[i]
             t_feat = teacher_feats[i].to(s_feat.device).detach()
 
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast('cuda', enabled=False):
                 adapted = self.adapters[i](s_feat.float())
 
                 if adapted.shape[2:] != t_feat.shape[2:]:
