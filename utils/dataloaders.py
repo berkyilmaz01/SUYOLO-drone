@@ -928,16 +928,36 @@ class LoadImagesLabelsAndTeacher(LoadImagesAndLabels):
             LOGGER.info(f'Teacher outputs: {n_found}/{len(self.im_files)} files found in {self.teacher_dir}')
 
     def __getitem__(self, index):
-        img, labels, path, shapes = super().__getitem__(index)
+        # When mosaic is off (KD active), disable spatial augmentations to
+        # maintain teacher-student spatial alignment. Teacher outputs were
+        # generated on un-augmented letterboxed images, so flips/scale/translate
+        # would make position-by-position KD comparisons meaningless.
+        # Non-spatial augmentations (HSV, albumentations) are kept.
+        _saved_hyp = None
+        if not self.mosaic and self.teacher_dir is not None and self.augment:
+            _spatial_keys = ('translate', 'scale', 'shear', 'degrees', 'perspective', 'flipud', 'fliplr')
+            _saved_hyp = {k: self.hyp[k] for k in _spatial_keys}
+            for k in _spatial_keys:
+                self.hyp[k] = 0.0
+        try:
+            img, labels, path, shapes = super().__getitem__(index)
+        finally:
+            if _saved_hyp is not None:
+                self.hyp.update(_saved_hyp)
 
         teacher_data = {}
-        if self.teacher_dir is not None:
+        if self.teacher_dir is not None and not self.mosaic:
             stem = Path(path).stem
             teacher_path = self.teacher_dir / f'{stem}.pt'
             if teacher_path.exists():
                 try:
                     teacher_data = torch.load(teacher_path, map_location='cpu', weights_only=False)
-                except Exception:
+                except Exception as e:
+                    if not hasattr(self, '_teacher_load_warns'):
+                        self._teacher_load_warns = 0
+                    self._teacher_load_warns += 1
+                    if self._teacher_load_warns <= 5:
+                        LOGGER.warning(f'Failed to load teacher output {teacher_path}: {e}')
                     teacher_data = {}
 
         return img, labels, path, shapes, teacher_data

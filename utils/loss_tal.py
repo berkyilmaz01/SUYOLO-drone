@@ -258,6 +258,10 @@ class DistillationLoss(nn.Module):
         between the cross-entropy and the teacher's own entropy, so the loss
         is 0 when the student perfectly matches the teacher (proper KL).
 
+        Uses T (not T²) for gradient correction: Hinton's T² applies to softmax
+        where cross-logit coupling adds an extra 1/T factor. For sigmoid (independent
+        per-logit), the gradient is (1/T)(σ(z/T) - p), so only T is needed.
+
         Args:
             student_logits: (B, C, N) student cls logits
             teacher_logits: (B, C, N) teacher cls logits
@@ -280,7 +284,8 @@ class DistillationLoss(nn.Module):
                 teacher_prob.clamp(eps, 1 - eps),
                 reduction='mean')
 
-            loss = (bce - teacher_entropy) * (T * T)
+            # T (not T²): sigmoid has no cross-logit coupling unlike softmax
+            loss = (bce - teacher_entropy) * T
 
         return loss
 
