@@ -71,15 +71,70 @@ CLEAN_BASELINES = [
     ("+ RIDCP",                        0.448, 0.242),
 ]
 
+# Our models: (name, epochs, fps_gpu, params_M, gflops, mAP_synth, mAP_real,
+#              gsyops, sparsity, energy_mj, is_snn)
+# gsyops/sparsity/energy_mj populated by tools/evaluate_full.py --skip-accuracy
+OUR_MODELS = [
+    {
+        "name": "YOLOv9-C (Teacher)",
+        "epochs": 150,
+        "fps": 53.1,
+        "params": 25.20,
+        "gflops": 0,      # populated after running evaluate_full.py
+        "mAP_synth": 0.862,
+        "mAP_real": 0,
+        "gsyops": 0,
+        "sparsity": 0,
+        "energy_mj": 0,
+        "is_snn": False,
+        "source": "ours",
+    },
+    {
+        "name": "SU-YOLO Ghost (Baseline)",
+        "epochs": 147,
+        "fps": 53.2,
+        "params": 0.55,
+        "gflops": 0,
+        "mAP_synth": 0.478,
+        "mAP_real": 0,
+        "gsyops": 0,
+        "sparsity": 0,
+        "energy_mj": 0,
+        "is_snn": True,
+        "source": "ours",
+    },
+    {
+        "name": "SU-YOLO Ghost + KD",
+        "epochs": 100,
+        "fps": 53.3,
+        "params": 0.55,
+        "gflops": 0,
+        "mAP_synth": 0.515,
+        "mAP_real": 0,
+        "gsyops": 0,
+        "sparsity": 0,
+        "energy_mj": 0,
+        "is_snn": True,
+        "source": "ours",
+    },
+]
 
-def print_leaderboard(entries=None, sort_by="mAP_synth", include_clean=False):
-    """Print a formatted leaderboard comparing all methods."""
+
+def print_leaderboard(entries=None, sort_by="mAP_synth", include_clean=False,
+                      with_ours=False, extended=False):
+    """Print a formatted leaderboard comparing all methods.
+
+    Args:
+        with_ours: Include our Teacher/Baseline/KD models from OUR_MODELS.
+        extended: Show extra SyOPs / energy columns (only meaningful for our SNN models).
+    """
     all_entries = []
     for name, ep, fps, params, gflops, map_s, map_r in PAPER_BASELINES:
         all_entries.append({
             "name": name, "epochs": ep, "fps": fps, "params": params,
             "gflops": gflops, "mAP_synth": map_s, "mAP_real": map_r,
-            "source": "paper"
+            "source": "paper",
+            "gsyops": 0, "sparsity": 0, "energy_mj": 0, "is_snn": False,
         })
 
     if include_clean:
@@ -87,8 +142,12 @@ def print_leaderboard(entries=None, sort_by="mAP_synth", include_clean=False):
             all_entries.append({
                 "name": name, "epochs": 12, "fps": 0, "params": 41.35,
                 "gflops": 0, "mAP_synth": map_s, "mAP_real": map_r,
-                "source": "clean"
+                "source": "clean",
+                "gsyops": 0, "sparsity": 0, "energy_mj": 0, "is_snn": False,
             })
+
+    if with_ours:
+        all_entries.extend(OUR_MODELS)
 
     if entries:
         all_entries.extend(entries)
@@ -99,38 +158,54 @@ def print_leaderboard(entries=None, sort_by="mAP_synth", include_clean=False):
 
     # Find best values for highlighting
     best_map_s = max(e["mAP_synth"] for e in all_entries if e["mAP_synth"] > 0)
-    best_map_r = max(e["mAP_real"] for e in all_entries if e["mAP_real"] > 0)
+    best_map_r = max((e["mAP_real"] for e in all_entries if e["mAP_real"] > 0), default=0)
+    best_params = min(e["params"] for e in all_entries if e["params"] > 0)
 
     # Header
-    print("\n" + "=" * 105)
+    width = 140 if extended else 105
+    print("\n" + "=" * width)
     print("  HazyDet Benchmark Leaderboard")
     print("  Paper: 'HazyDet: Drone-View Object Detection with Depth-Cues in Hazy Scenes'")
-    print("=" * 105)
-    hdr = f"{'Rank':<5} {'Model':<25} {'Epochs':<8} {'FPS':<8} {'Params(M)':<11} {'mAP(Synth)':<12} {'mAP(Real)':<12} {'Source':<8}"
+    print("=" * width)
+
+    hdr = f"{'Rank':<5} {'Model':<27} {'Ep':<5} {'FPS':<7} {'Params(M)':<11} {'GFLOPs':<9} {'mAP50':<9} {'mAP(R)':<9} {'Src':<6}"
+    if extended:
+        hdr += f" {'GSyOPs':<9} {'Spars.':<7} {'E(mJ)':<9}"
     print(hdr)
-    print("-" * 105)
+    print("-" * width)
 
     for rank, e in enumerate(all_entries, 1):
         name = e["name"]
         map_s_str = f"{e['mAP_synth']:.3f}"
-        map_r_str = f"{e['mAP_real']:.3f}" if e["mAP_real"] > 0 else "  —"
+        map_r_str = f"{e['mAP_real']:.3f}" if e.get("mAP_real", 0) > 0 else "—"
 
-        # Mark best with asterisk
         if e["mAP_synth"] == best_map_s:
-            map_s_str += " *"
-        if e["mAP_real"] == best_map_r and e["mAP_real"] > 0:
-            map_r_str += " *"
+            map_s_str += "*"
+        if e.get("mAP_real", 0) == best_map_r and best_map_r > 0:
+            map_r_str += "*"
 
-        # Highlight our entries
-        marker = ">>>" if e["source"] != "paper" else "   "
-        ep_str = str(e["epochs"]) if e["epochs"] > 0 else "—"
-        fps_str = f"{e['fps']:.1f}" if e["fps"] > 0 else "—"
-        params_str = f"{e['params']:.2f}" if e["params"] > 0 else "—"
+        marker = ">>>" if e.get("source") not in ("paper", "clean") else "   "
+        ep_str = str(e["epochs"]) if e.get("epochs", 0) > 0 else "—"
+        fps_str = f"{e['fps']:.1f}" if e.get("fps", 0) > 0 else "—"
+        params_str = f"{e['params']:.2f}" if e.get("params", 0) > 0 else "—"
+        if e["params"] == best_params:
+            params_str += "*"
+        gflops_str = f"{e['gflops']:.1f}" if e.get("gflops", 0) > 0 else "—"
 
-        print(f"{marker}{rank:<2} {name:<25} {ep_str:<8} {fps_str:<8} {params_str:<11} {map_s_str:<12} {map_r_str:<12} {e['source']:<8}")
+        line = f"{marker}{rank:<2} {name:<27} {ep_str:<5} {fps_str:<7} {params_str:<11} {gflops_str:<9} {map_s_str:<9} {map_r_str:<9} {e.get('source',''):<6}"
 
-    print("=" * 105)
+        if extended:
+            gsyops_str = f"{e['gsyops']:.2f}" if e.get("gsyops", 0) > 0 else "—"
+            spars_str = f"{e['sparsity']*100:.0f}%" if e.get("is_snn") and e.get("sparsity", 0) > 0 else "—"
+            energy_str = f"{e['energy_mj']:.4f}" if e.get("energy_mj", 0) > 0 else "—"
+            line += f" {gsyops_str:<9} {spars_str:<7} {energy_str:<9}"
+
+        print(line)
+
+    print("=" * width)
     print("  * = best in column  |  >>> = your model")
+    if extended:
+        print("  GSyOPs = GFLOPs × (1 - sparsity)  |  E(mJ) = estimated energy/frame at 45nm CMOS")
     print()
 
 
@@ -189,6 +264,29 @@ def save_results_log(log_path, entries):
         json.dump(entries, f, indent=2)
 
 
+def update_our_models_from_eval(eval_json_path):
+    """Update OUR_MODELS entries with computed values from evaluate_full.py JSON output."""
+    try:
+        with open(eval_json_path) as f:
+            eval_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"  WARNING: Could not load eval results from {eval_json_path}: {e}")
+        return
+
+    for eval_entry in eval_data:
+        for our_entry in OUR_MODELS:
+            if eval_entry.get('name') == our_entry['name']:
+                if eval_entry.get('gflops', 0) > 0:
+                    our_entry['gflops'] = eval_entry['gflops']
+                if eval_entry.get('gsyops', 0) > 0:
+                    our_entry['gsyops'] = eval_entry['gsyops']
+                if eval_entry.get('sparsity', 0) > 0:
+                    our_entry['sparsity'] = eval_entry['sparsity']
+                if eval_entry.get('energy_mj', 0) > 0:
+                    our_entry['energy_mj'] = eval_entry['energy_mj']
+                break
+
+
 def main():
     parser = argparse.ArgumentParser(description="HazyDet Benchmark Comparison Tool")
     parser.add_argument("--weights", type=str, default="", help="Model weights path (.pt)")
@@ -203,6 +301,12 @@ def main():
                         help="Sort leaderboard by column")
     parser.add_argument("--include-clean", action="store_true",
                         help="Include clean-image training baselines (Table 5 from paper)")
+    parser.add_argument("--with-ours", action="store_true",
+                        help="Include our Teacher/Baseline/KD models in the leaderboard")
+    parser.add_argument("--extended", action="store_true",
+                        help="Show extra SyOPs / sparsity / energy columns")
+    parser.add_argument("--from-eval", type=str, default="",
+                        help="JSON file from evaluate_full.py to populate GFLOPs/SyOPs/energy")
     # Manual entry
     parser.add_argument("--add-entry", action="store_true", help="Add a manual result entry")
     parser.add_argument("--name", type=str, default="SU-YOLO", help="Model name for entry")
@@ -215,6 +319,9 @@ def main():
                         help="Path to results log file")
 
     args = parser.parse_args()
+
+    if args.from_eval:
+        update_our_models_from_eval(args.from_eval)
 
     log_path = ROOT / args.log
     custom_entries = []
@@ -255,7 +362,6 @@ def main():
                 if i < len(class_names):
                     print(f"  AP({class_names[i]}):    {ap:.4f}")
 
-        # Use mAP@0.5 as the comparable metric (paper's mAP)
         entry = {
             "name": args.name if args.name != "SU-YOLO" else f"SU-YOLO ({Path(args.weights).parent.parent.name})",
             "epochs": args.epochs,
@@ -269,7 +375,10 @@ def main():
         custom_entries.append(entry)
         save_results_log(log_path, custom_entries)
 
-    print_leaderboard(custom_entries, sort_by=args.sort_by, include_clean=args.include_clean)
+    print_leaderboard(custom_entries, sort_by=args.sort_by,
+                      include_clean=args.include_clean,
+                      with_ours=args.with_ours,
+                      extended=args.extended)
 
 
 if __name__ == "__main__":
