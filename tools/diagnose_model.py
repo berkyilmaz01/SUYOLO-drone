@@ -91,53 +91,58 @@ def collect_predictions(model, dataloader, device, conf_thres=0.001,
         targets = targets.to(device)
         nb, _, height, width = im.shape
 
+        # Convert normalized targets to pixel coordinates (critical — matches val.py L215)
+        targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)
+
         with torch.no_grad():
             preds = model(im)
-        if isinstance(preds, (tuple, list)):
-            preds = preds[0]
 
-        preds = non_max_suppression(preds, conf_thres, iou_thres, max_det=300)
+        preds = non_max_suppression(preds, conf_thres, iou_thres,
+                                    multi_label=True, max_det=300)
 
         for si, pred in enumerate(preds):
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
-            tcls = labels[:, 0].tolist() if nl else []
             shape = shapes[si][0]
+
+            # Build native-space labels (cls, x1, y1, x2, y2)
+            labelsn = None
+            if nl:
+                tbox = xywh2xyxy(labels[:, 1:5])
+                scale_boxes(im[si].shape[1:], tbox, shape, shapes[si][1])
+                labelsn = torch.cat((labels[:, 0:1], tbox), 1)
 
             if len(pred) == 0:
                 if nl:
                     stats.append((torch.zeros((0, niou), dtype=torch.bool, device=device),
                                   torch.Tensor(), torch.Tensor(), labels[:, 0]))
-                    for lbl in labels:
-                        c, x, y, w, h = lbl.tolist()
-                        all_labels.append([batch_i * nb + si, c, x, y, w, h])
+                    for lbl in labelsn:
+                        all_labels.append([batch_i * nb + si] + lbl.cpu().tolist())
                 continue
 
             predn = pred.clone()
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])
 
             if nl:
-                tbox = xywh2xyxy(labels[:, 1:5])
-                scale_boxes(im[si].shape[1:], tbox, shape, shapes[si][1])
-                labelsn = torch.cat((labels[:, 0:1], tbox), 1)
                 correct = _process_batch(predn, labelsn, iouv)
             else:
                 correct = torch.zeros(len(pred), niou, dtype=torch.bool, device=device)
 
             stats.append((correct, pred[:, 4], pred[:, 5], labels[:, 0]))
 
+            # Store in native pixel xyxy coords for error/calibration analysis
             for p in predn:
                 all_preds.append([batch_i * nb + si] + p[:6].cpu().tolist())
-            for lbl in labels:
-                c, x, y, w, h = lbl.tolist()
-                all_labels.append([batch_i * nb + si, c, x, y, w, h])
+            if labelsn is not None:
+                for lbl in labelsn:
+                    all_labels.append([batch_i * nb + si] + lbl.cpu().tolist())
 
     stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*stats)]
     return stats, all_preds, all_labels
 
 
 def _process_batch(detections, labels, iouv):
-    """Compute correct prediction matrix (from val.py)."""
+    """Compute correct prediction matrix (matches val.py process_batch exactly)."""
     correct = np.zeros((detections.shape[0], iouv.shape[0])).astype(bool)
     iou = box_iou(labels[:, 1:], detections[:, :4])
     correct_class = labels[:, 0:1] == detections[:, 5]
@@ -148,10 +153,9 @@ def _process_batch(detections, labels, iouv):
             if x[0].shape[0] > 1:
                 matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
             correct[matches[:, 1].astype(int), i] = True
-    return torch.tensor(correct, dtype=torch.bool, device=detections.device)
+    return torch.tensor(correct, dtype=torch.bool, device=iouv.device)
 
 
 def per_class_metrics(stats, nc=3):
@@ -222,20 +226,21 @@ def plot_per_class_comparison(results_dict, save_dir):
 # ---------------------------------------------------------------------------
 
 def per_scale_analysis(all_preds, all_labels, model, img_size, nc=3):
-    """Assign each prediction to its likely detection scale and compute
-    per-scale mAP.  Predictions are assigned by matching anchor stride to
-    object size: P2/4 for small, P3/8 for medium, P4/16 for large."""
+    """Compute object size distribution from GT labels.
 
+    all_labels: list of [img_idx, cls, x1, y1, x2, y2] in native pixel xyxy.
+    Object area = (x2-x1) * (y2-y1) in pixels^2.
+    """
     strides = model.model[-1].stride.cpu().numpy() if hasattr(model.model[-1], 'stride') else np.array([4, 8, 16])
-    scale_names = [f'P{int(np.log2(s))}/{int(s)}' for s in strides]
 
     if not all_labels:
         return None
 
-    labels_arr = np.array(all_labels)  # (N, 6) img_idx, cls, x,y,w,h
-    preds_arr = np.array(all_preds) if all_preds else np.zeros((0, 7))
+    labels_arr = np.array(all_labels)  # (N, 6) img_idx, cls, x1, y1, x2, y2
 
-    areas = labels_arr[:, 4] * labels_arr[:, 5] * img_size * img_size if len(labels_arr) > 0 else np.array([])
+    widths = labels_arr[:, 4] - labels_arr[:, 2]   # x2 - x1
+    heights = labels_arr[:, 5] - labels_arr[:, 3]  # y2 - y1
+    areas = widths * heights  # pixel^2
 
     area_thresholds = [0, 32**2, 96**2, float('inf')]
     scale_labels = ['Small (<32px)', 'Medium (32-96px)', 'Large (>96px)']
@@ -243,9 +248,9 @@ def per_scale_analysis(all_preds, all_labels, model, img_size, nc=3):
     result = {}
     for si, (lo, hi, sname) in enumerate(zip(area_thresholds[:-1], area_thresholds[1:], scale_labels)):
         mask = (areas >= lo) & (areas < hi)
-        n_gt = mask.sum()
+        n_gt = int(mask.sum())
         result[sname] = {
-            'n_gt': int(n_gt),
+            'n_gt': n_gt,
             'scale_stride': strides[min(si, len(strides) - 1)] if si < len(strides) else strides[-1],
         }
 
@@ -289,6 +294,9 @@ def error_decomposition(all_preds, all_labels, nc=3, conf_thres=0.25,
                         iou_thres_correct=0.5, iou_thres_loose=0.1):
     """Classify each detection/GT into error categories.
 
+    all_preds:  list of [img_idx, x1, y1, x2, y2, conf, cls] in native pixel xyxy
+    all_labels: list of [img_idx, cls, x1, y1, x2, y2] in native pixel xyxy
+
     Returns dict with counts of:
       - correct: right class, IoU >= 0.5
       - cls_error: wrong class, IoU >= 0.5
@@ -321,7 +329,7 @@ def error_decomposition(all_preds, all_labels, nc=3, conf_thres=0.25,
         p_mask = preds[:, 0] == img_id
         l_mask = labels[:, 0] == img_id
         img_preds = preds[p_mask]   # (M, 7) img_idx, x1,y1,x2,y2, conf, cls
-        img_labels = labels[l_mask]  # (N, 6) img_idx, cls, x,y,w,h
+        img_labels = labels[l_mask]  # (N, 6) img_idx, cls, x1,y1,x2,y2 (native xyxy)
 
         if len(img_labels) == 0:
             results['background_fp'] += len(img_preds)
@@ -332,8 +340,7 @@ def error_decomposition(all_preds, all_labels, nc=3, conf_thres=0.25,
             continue
 
         pred_boxes = torch.tensor(img_preds[:, 1:5], dtype=torch.float32)
-        gt_xywh = torch.tensor(img_labels[:, 2:6], dtype=torch.float32)
-        gt_boxes = xywh2xyxy(gt_xywh)
+        gt_boxes = torch.tensor(img_labels[:, 2:6], dtype=torch.float32)  # already xyxy
 
         iou = box_iou(gt_boxes, pred_boxes).numpy()
 
@@ -678,7 +685,11 @@ def plot_sparsity_map(block_stats, summary, save_dir, model_name='Model'):
 # ---------------------------------------------------------------------------
 
 def confidence_calibration(all_preds, all_labels, nc=3, n_bins=10):
-    """Bin predictions by confidence and compute actual precision per bin."""
+    """Bin predictions by confidence and compute actual precision per bin.
+
+    all_preds:  list of [img_idx, x1, y1, x2, y2, conf, cls] in native pixel xyxy
+    all_labels: list of [img_idx, cls, x1, y1, x2, y2] in native pixel xyxy
+    """
     preds = np.array(all_preds) if all_preds else np.zeros((0, 7))
     labels = np.array(all_labels) if all_labels else np.zeros((0, 6))
 
@@ -708,8 +719,7 @@ def confidence_calibration(all_preds, all_labels, nc=3, n_bins=10):
             img_labels = labels[labels[:, 0] == img_id]
             if len(img_labels) == 0:
                 continue
-            gt_xywh = torch.tensor(img_labels[:, 2:6], dtype=torch.float32)
-            gt_boxes = xywh2xyxy(gt_xywh)
+            gt_boxes = torch.tensor(img_labels[:, 2:6], dtype=torch.float32)  # already xyxy
             pred_box = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float32)
             ious = box_iou(gt_boxes, pred_box).numpy().flatten()
             gt_cls = img_labels[:, 1]
