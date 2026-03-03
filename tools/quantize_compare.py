@@ -609,15 +609,15 @@ def main():
             print(f'  Activation fake-quant: {len(act_hooks)} hooks → {cfg["act_bits"]}-bit')
 
         # Phase 3c: Validate (mAP)
+        # Remove hooks before saving (closures can't be pickled)
+        for h in act_hooks:
+            h.remove()
+        act_hooks = []
+
         metrics = {}
         if not args.skip_val and args.data:
-            # Save model with fake-quantized weights, run val.py
             tmp_path = save_dir / f'model_{scheme_name}.pt'
             torch.save({'model': model, 'ema': None, 'epoch': -1}, tmp_path)
-
-            # Remove hooks before saving (hooks don't serialize)
-            for h in act_hooks:
-                h.remove()
 
             print(f'  Running validation...')
             metrics, output = _run_val_cli(tmp_path, args.data, args.img, args.batch, args.time_step)
@@ -628,9 +628,6 @@ def main():
             else:
                 print(f'  WARNING: Could not parse val output')
                 print(f'  (tail): {output[-300:]}')
-        else:
-            for h in act_hooks:
-                h.remove()
 
         # Phase 4: Hardware export
         hw_summary = None
