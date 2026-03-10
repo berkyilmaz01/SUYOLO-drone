@@ -699,6 +699,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+        if isinstance(m, str) and use_repghost and m in REPGHOST_MAP:
+            m = REPGHOST_MAP[m]
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
             with contextlib.suppress(NameError):
@@ -708,7 +710,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m in {
             BasicBlock1, BasicBlock2, SEncoder, SEncoderLite, SConv, TransitionBlock, Conv, AConv, ConvTranspose, Bottleneck, SPP, SPPF,
             DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown, RepNCSPELAN4, SPPELAN, ELAN1,
-            SGhostConv, SGhostEncoder, SGhostEncoderLite, GhostBasicBlock1, GhostBasicBlock2, GhostTransitionBlock}:
+            SGhostConv, SGhostEncoder, SGhostEncoderLite, GhostBasicBlock1, GhostBasicBlock2, GhostTransitionBlock,
+            SRepGhostConv, SRepGhostEncoderLite, RepGhostBasicBlock1, RepGhostBasicBlock2}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)

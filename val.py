@@ -27,7 +27,7 @@ from utils.torch_utils import select_device, smart_inference_mode
 
 from spikingjelly.activation_based.functional import reset_net
 from models.experimental import attempt_load
-from models.spike import set_time_step
+from models.spike import set_time_step, set_repghost
 
 def save_one_txt(predn, save_conf, shape, file):
     # Save one txt result
@@ -103,6 +103,7 @@ def run(
         half=True,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         min_items=0,  # Experimental
+        repghost=False,  # Use RepGhost architecture
         model=None,
         dataloader=None,
         save_dir=Path(''),
@@ -112,6 +113,8 @@ def run(
 ):
     # Set SNN time step (must match training config to avoid seBatchNorm dimension crash)
     set_time_step(time_step)
+    if repghost:
+        set_repghost(True)
 
     # Initialize/load model and set device
     training = model is not None
@@ -362,6 +365,7 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--time-step', type=int, default=4, help='SNN time steps (must match training config)')
+    parser.add_argument('--repghost', action='store_true', help='Use RepGhost architecture (no concat)')
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML

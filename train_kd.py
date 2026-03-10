@@ -77,7 +77,7 @@ RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None
 import models.spike
-from models.spike import set_time_step
+from models.spike import set_time_step, set_repghost
 from spikingjelly.activation_based.functional import reset_net
 
 
@@ -86,6 +86,8 @@ def train(hyp, opt, device, callbacks):
         Path(opt.save_dir), opt.time_step, opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
         opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
     set_time_step(time_step)
+    if getattr(opt, 'repghost', False):
+        set_repghost(True)
     callbacks.run('on_pretrain_routine_start')
 
     # KD parameters
@@ -740,6 +742,7 @@ def parse_opt(known=False):
     parser.add_argument('--data', type=str, default=ROOT / 'data/visdrone.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-high.yaml', help='hyperparameters path')
     parser.add_argument('--time-step', type=int, default=4, help='total time step')
+    parser.add_argument('--repghost', action='store_true', help='Use RepGhost architecture (no concat)')
     parser.add_argument('--epochs', type=int, default=300, help='total training epochs')
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=736, help='train, val image size (pixels)')

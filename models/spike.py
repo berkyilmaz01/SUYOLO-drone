@@ -22,6 +22,14 @@ from scipy.stats import norm, gaussian_kde
 
 
 time_step = 4
+use_repghost = False
+
+REPGHOST_MAP = {
+    'SGhostConv': 'SRepGhostConv',
+    'SGhostEncoderLite': 'SRepGhostEncoderLite',
+    'GhostBasicBlock1': 'RepGhostBasicBlock1',
+    'GhostBasicBlock2': 'RepGhostBasicBlock2',
+}
 
 
 def set_time_step(t):
@@ -29,6 +37,12 @@ def set_time_step(t):
     Lower values (1-2) improve DPU/FPGA inference speed at the cost of accuracy."""
     global time_step
     time_step = t
+
+
+def set_repghost(flag):
+    """Enable/disable RepGhost architecture (add-based, no concatenation)."""
+    global use_repghost
+    use_repghost = flag
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     # Pad to 'same' shape outputs
@@ -611,6 +625,172 @@ class GhostTransitionBlock(nn.Module):
         out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
         out = [self.act(out[i]) for i in range(time_step)]
         out = self.cv5(out)
+        return out
+
+
+###############################################################################
+# RepGhost Convolution modules — re-parameterizable variants of the Ghost
+# modules above.  Replace concatenation with addition + identity BN, which
+# folds into a single DW conv at deploy time.  Activated via --repghost flag.
+###############################################################################
+
+class SRepGhostConv(nn.Module):
+    """Spiking RepGhost Convolution — drop-in replacement for SGhostConv.
+
+    Eliminates concatenation via re-parameterization:
+      Training:  Conv(c1→c2)→BN→IFNode → [DWConv→BN + BN_identity] → ADD → IFNode
+      Inference: FusedConv(c1→c2)→IFNode → FusedDWConv→IFNode
+
+    Same interface as SGhostConv: takes and returns list[Tensor] of length time_step.
+    Primary conv produces full c2 channels (vs c2/2 in Ghost).
+    """
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True,
+                 lif=None, step_mode='s', n=1.0, ratio=2, dw_k=3):
+        super().__init__()
+        self.primary = SConv(c1, c2, k, s, p, g, d, act, lif, step_mode, n)
+        self.cheap_conv = layer.Conv2d(c2, c2, dw_k, 1, autopad(dw_k),
+                                       groups=c2, bias=False, step_mode='s')
+        self.cheap_bn = seBatchNorm(c2, time_step, n)
+        self.rep_bn = seBatchNorm(c2, time_step, n)
+        self.act = (neuron.IFNode(surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+                    if act else nn.Identity())
+
+    def forward(self, x):
+        out = self.primary(x)
+        cheap = [self.cheap_conv(out[i]) for i in range(time_step)]
+        cheap = self.cheap_bn(cheap)
+        if hasattr(self, 'rep_bn') and not isinstance(self.rep_bn, nn.Identity):
+            ident = self.rep_bn(out)
+            out = [cheap[i] + ident[i] for i in range(time_step)]
+        else:
+            out = cheap
+        out = [self.act(out[i]) for i in range(time_step)]
+        return out
+
+    def fuse_reparam(self):
+        """Fuse identity BN branch into cheap DW conv for deployment."""
+        if isinstance(self.rep_bn, nn.Identity):
+            return
+
+        w_cheap = self.cheap_conv.weight.detach().float()
+        c_out = w_cheap.shape[0]
+        dw_k = w_cheap.shape[2]
+
+        bn_cheap = self.cheap_bn.bn
+        vs_c = getattr(bn_cheap, 'var_scale', 1.0)
+        gamma_c = bn_cheap.weight[:c_out].detach().float()
+        beta_c = bn_cheap.bias[:c_out].detach().float()
+        mean_c = bn_cheap.running_mean[:c_out].detach().float()
+        var_c = bn_cheap.running_var[:c_out].detach().float()
+        inv_std_c = gamma_c / torch.sqrt(var_c / vs_c + bn_cheap.eps)
+        fused_w = w_cheap * inv_std_c.view(-1, 1, 1, 1)
+        fused_b = beta_c - mean_c * inv_std_c
+
+        identity_kernel = torch.zeros_like(w_cheap)
+        identity_kernel[:, 0, dw_k // 2, dw_k // 2] = 1.0
+
+        bn_id = self.rep_bn.bn
+        vs_i = getattr(bn_id, 'var_scale', 1.0)
+        gamma_i = bn_id.weight[:c_out].detach().float()
+        beta_i = bn_id.bias[:c_out].detach().float()
+        mean_i = bn_id.running_mean[:c_out].detach().float()
+        var_i = bn_id.running_var[:c_out].detach().float()
+        inv_std_i = gamma_i / torch.sqrt(var_i / vs_i + bn_id.eps)
+        fused_w = fused_w + identity_kernel * inv_std_i.view(-1, 1, 1, 1)
+        fused_b = fused_b + (beta_i - mean_i * inv_std_i)
+
+        self.cheap_conv.weight.data = fused_w
+        if self.cheap_conv.bias is None:
+            self.cheap_conv.bias = nn.Parameter(fused_b)
+        else:
+            self.cheap_conv.bias.data = fused_b
+        self.cheap_bn = nn.Identity()
+        self.rep_bn = nn.Identity()
+
+
+class SRepGhostEncoderLite(nn.Module):
+    """RepGhost version of SGhostEncoderLite.
+    Stride 2 FIRST (cheap at Cin=3), then RepGhost conv at half resolution."""
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True,
+                 lif=None, step_mode='s', ratio=2, dw_k=3):
+        super().__init__()
+        self.default_act = neuron.IFNode(surrogate_function=surrogate.ATan(),
+                                         detach_reset=True, step_mode='s')
+        self.conv1 = SConv(c1, c2, k, 2, p, g, d, act=True)
+        self.conv2 = SRepGhostConv(c2, c2, k, 1, p, g, d, act=True, ratio=ratio, dw_k=dw_k)
+
+    def forward(self, x):
+        x = [x for _ in range(time_step)]
+        out = self.conv1(x)
+        out = self.conv2(out)
+        return out
+
+
+class RepGhostBasicBlock1(nn.Module):
+    """RepGhost version of GhostBasicBlock1 (CSP-ELAN with stride 2)."""
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cvres = SRepGhostConv(c1, c2 // 2, 1, 2, act=False, n=2)
+        self.cv0 = SRepGhostConv(c1, c2, 3, 2, act=False)
+        self.cv2 = SRepGhostConv(c4, c4, 3, 1, act=False, n=2)
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.c = c4
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        xres = self.cvres(x)
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        for i in range(time_step):
+            x4[i] = x4[i] + xres[i]
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
+        return out
+
+
+class RepGhostBasicBlock2(nn.Module):
+    """RepGhost version of GhostBasicBlock2 (CSP-ELAN, no stride)."""
+    def __init__(self, c1, c2, c3, c4, c5=1):
+        super().__init__()
+        self.cv0 = SRepGhostConv(c1, c2, 1, 1, act=False)
+        self.cv2 = SRepGhostConv(c4, c4, 3, 1, act=False)
+        self.act2 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+        self.act3 = neuron.IFNode(v_threshold=1.0, surrogate_function=surrogate.ATan(),
+                                  detach_reset=True, step_mode='s')
+
+    def forward(self, x):
+        x1 = []
+        x2 = []
+
+        x = self.cv0(x)
+
+        for i in range(time_step):
+            y1, y2 = x[i].chunk(2, 1)
+            x1.append(y1)
+            x2.append(y2)
+
+        x3 = [self.act2(x2[i]) for i in range(time_step)]
+        x4 = self.cv2(x3)
+        y = [x1, x4]
+
+        out = [torch.cat([n[i] for n in y], 1) for i in range(time_step)]
+        out = [self.act3(out[i]) for i in range(time_step)]
         return out
 
 

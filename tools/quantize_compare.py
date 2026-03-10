@@ -31,7 +31,6 @@ import argparse
 import copy
 import csv
 import json
-import subprocess
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -45,9 +44,10 @@ import torch
 import torch.nn as nn
 
 import models.spike as spike
-from models.spike import (SConv, seBatchNorm, SeBatchNorm2d)
+from models.spike import (SConv, seBatchNorm, SeBatchNorm2d, SRepGhostConv)
 from spikingjelly.activation_based.functional import reset_net
 from spikingjelly.activation_based import neuron
+from val import run as val_run
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scheme definitions
@@ -105,8 +105,16 @@ def fuse_all_bn(model):
 
     SDConv is SKIPPED — it defines self.bn in __init__ but never calls it
     in forward(), so those BN params are untrained and must not be fused.
+
+    SRepGhostConv is handled first — its fuse_reparam() folds the identity BN
+    branch into the cheap DW conv (add → single conv at deploy time).
     """
     n = 0
+    for _, mod in model.named_modules():
+        if isinstance(mod, SRepGhostConv):
+            if hasattr(mod, 'fuse_reparam'):
+                mod.fuse_reparam()
+                n += 1
     for _, mod in model.named_modules():
         if isinstance(mod, SConv):
             if isinstance(mod.bn, nn.Identity):
@@ -434,38 +442,6 @@ def export_hardware_package(model, scheme_name, scheme_cfg, calib_ranges, save_d
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Validation via val.py CLI
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _run_val_cli(weights_path, data, imgsz, batch_size, time_step):
-    cmd = [
-        sys.executable, str(ROOT / 'val.py'),
-        '--data', data, '--weights', str(weights_path),
-        '--img', str(imgsz), '--batch', str(batch_size),
-        '--time-step', str(time_step),
-        '--task', 'val',
-        '--project', str(ROOT / 'runs' / 'quantize'),
-        '--name', 'val_tmp', '--exist-ok',
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
-    output = result.stdout + result.stderr
-
-    metrics = {}
-    for line in output.split('\n'):
-        s = line.strip()
-        if s.startswith('all'):
-            parts = s.split()
-            try:
-                metrics = {
-                    'P': float(parts[3]), 'R': float(parts[4]),
-                    'mAP50': float(parts[5]), 'mAP50_95': float(parts[6]),
-                }
-            except (ValueError, IndexError):
-                pass
-    return metrics, output
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # ZCU102 Resource Estimation
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -518,6 +494,7 @@ def main():
     p.add_argument('--img', type=int, default=1920, help='Image size')
     p.add_argument('--batch', type=int, default=4)
     p.add_argument('--time-step', type=int, default=1)
+    p.add_argument('--repghost', action='store_true', help='Use RepGhost architecture (no concat)')
     p.add_argument('--device', default='0')
     p.add_argument('--save-dir', default='runs/quantize/')
     p.add_argument('--schemes', nargs='+', default=list(SCHEMES.keys()),
@@ -534,6 +511,8 @@ def main():
 
     spike.time_step = args.time_step
     spike.set_time_step(args.time_step)
+    if args.repghost:
+        spike.set_repghost(True)
 
     hdr = '=' * 80
     print(f'\n{hdr}')
@@ -608,26 +587,46 @@ def main():
             act_hooks = apply_activation_fakequant(model, cfg, calib_ranges)
             print(f'  Activation fake-quant: {len(act_hooks)} hooks → {cfg["act_bits"]}-bit')
 
-        # Phase 3c: Validate (mAP)
-        # Remove hooks before saving (closures can't be pickled)
+        # Phase 3c: Validate (mAP) — run IN-PROCESS so activation hooks stay active
+        metrics = {}
+        if not args.skip_val and args.data:
+            from utils.dataloaders import create_dataloader
+            from utils.general import check_dataset, check_img_size
+
+            print(f'  Running validation (in-process)...')
+            model.to(device).eval()
+
+            data_dict = check_dataset(args.data)
+            stride = int(max(model.stride)) if hasattr(model, 'stride') else 32
+            gs = check_img_size(args.img, s=stride)
+            val_path = data_dict.get('val', data_dict.get('test', ''))
+            val_loader = create_dataloader(
+                val_path, gs, args.batch, stride,
+                pad=0.5, rect=True, workers=8,
+                prefix='quant-val: '
+            )[0]
+
+            val_results = val_run(
+                data=data_dict,
+                model=model,
+                dataloader=val_loader,
+                imgsz=args.img,
+                batch_size=args.batch,
+                time_step=args.time_step,
+                half=False,
+                plots=False,
+                save_dir=save_dir,
+            )
+            mp, mr, map50, map95 = val_results[0][:4]
+            metrics = {'P': float(mp), 'R': float(mr),
+                       'mAP50': float(map50), 'mAP50_95': float(map95)}
+            print(f'  mAP50: {metrics["mAP50"]:.4f}  mAP50-95: {metrics["mAP50_95"]:.4f}'
+                  f'  P: {metrics["P"]:.4f}  R: {metrics["R"]:.4f}')
+
+        # NOW remove hooks (after validation, so they were active during inference)
         for h in act_hooks:
             h.remove()
         act_hooks = []
-
-        metrics = {}
-        if not args.skip_val and args.data:
-            tmp_path = save_dir / f'model_{scheme_name}.pt'
-            torch.save({'model': model, 'ema': None, 'epoch': -1}, tmp_path)
-
-            print(f'  Running validation...')
-            metrics, output = _run_val_cli(tmp_path, args.data, args.img, args.batch, args.time_step)
-
-            if metrics:
-                print(f'  mAP50: {metrics["mAP50"]:.4f}  mAP50-95: {metrics["mAP50_95"]:.4f}'
-                      f'  P: {metrics["P"]:.4f}  R: {metrics["R"]:.4f}')
-            else:
-                print(f'  WARNING: Could not parse val output')
-                print(f'  (tail): {output[-300:]}')
 
         # Phase 4: Hardware export
         hw_summary = None
