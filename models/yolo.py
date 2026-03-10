@@ -25,6 +25,7 @@ try:
 except ImportError:
     thop = None
 
+import models.spike as spike
 from models.spike import *
 from spikingjelly.activation_based.functional import reset_net
 import torchvision.transforms as transforms
@@ -699,7 +700,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
-        if isinstance(m, str) and use_repghost and m in REPGHOST_MAP:
+        if isinstance(m, str) and spike.use_repghost and m in REPGHOST_MAP:
             m = REPGHOST_MAP[m]
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
